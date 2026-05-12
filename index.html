@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Control de Precios · Loyverse</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #161b22; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    input[type=number]::-webkit-inner-spin-button { opacity: 0.5; }
+    a { color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useCallback } = React;
+
+    const API_BASE = "https://api.loyverse.com/v1.0";
+
+    const C = {
+      bg: "#0d1117", surface: "#161b22", card: "#1c2230", border: "#30363d",
+      accent: "#f0b429", accentDim: "#f0b42918", green: "#3fb950", greenDim: "#3fb95018",
+      red: "#f85149", redDim: "#f8514918", blue: "#58a6ff",
+      text: "#e6edf3", muted: "#768390", faint: "#3d444d",
+    };
+
+    const fmt = (n) =>
+      n == null ? "—" : "$" + Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    function App() {
+      const [token, setToken] = useState("");
+      const [inflation, setInflation] = useState("");
+      const [rounding, setRounding] = useState("10");
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [items, setItems] = useState([]);
+      const [filter, setFilter] = useState("");
+      const [sortBy, setSortBy] = useState("name");
+      const [sortDir, setSortDir] = useState(1);
+
+      const pct = parseFloat(inflation) || 0;
+      const roundTo = parseFloat(rounding) || 1;
+
+      const suggested = (price) => {
+        if (price == null) return null;
+        const raw = price * (1 + pct / 100);
+        return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
+      };
+
+      const fetchProducts = useCallback(async () => {
+        if (!token.trim()) { setError("Ingresá tu token de Loyverse."); return; }
+        setLoading(true); setError(""); setItems([]);
+        try {
+          let all = [], cursor = null;
+          do {
+            const url = `${API_BASE}/items?limit=250` + (cursor ? `&cursor=${cursor}` : "");
+            const res = await fetch(url, { headers: { Authorization: `Bearer ${token.trim()}` } });
+            if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+            const data = await res.json();
+            all = all.concat(data.items || []);
+            cursor = data.cursor || null;
+          } while (cursor);
+
+          const flat = [];
+          for (const item of all) {
+            for (const v of item.variants || []) {
+              flat.push({
+                id: item.id, variantId: v.id,
+                name: item.item_name, variant: v.variant_name || "",
+                price: v.default_price, cost: v.cost ?? null, sku: v.sku || "",
+              });
+            }
+          }
+          setItems(flat);
+        } catch (e) { setError(e.message); }
+        finally { setLoading(false); }
+      }, [token]);
+
+      const handleSort = (col) => {
+        if (sortBy === col) setSortDir((d) => -d);
+        else { setSortBy(col); setSortDir(1); }
+      };
+
+      const filtered = items
+        .filter((i) => {
+          if (!filter) return true;
+          const q = filter.toLowerCase();
+          return i.name.toLowerCase().includes(q) || i.variant.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q);
+        })
+        .sort((a, b) => {
+          let va = a[sortBy], vb = b[sortBy];
+          if (sortBy === "suggested") { va = suggested(a.price); vb = suggested(b.price); }
+          if (sortBy === "diff") { va = (suggested(a.price) || 0) - (a.price || 0); vb = (suggested(b.price) || 0) - (b.price || 0); }
+          if (va == null) return 1;
+          if (vb == null) return -1;
+          return typeof va === "string" ? va.localeCompare(vb) * sortDir : (va - vb) * sortDir;
+        });
+
+      const totalCurrent = items.reduce((s, i) => s + (i.price || 0), 0);
+      const totalSuggested = items.reduce((s, i) => s + (suggested(i.price) || 0), 0);
+
+      const inp = (extra = {}) => ({
+        background: C.surface, border: `1px solid ${C.border}`, borderRadius: "8px",
+        padding: "10px 13px", color: C.text, fontSize: "13px",
+        fontFamily: "'IBM Plex Mono','Fira Code',monospace", outline: "none",
+        width: "100%", ...extra,
+      });
+
+      const Th = ({ col, label, right }) => (
+        <th onClick={() => handleSort(col)} style={{
+          padding: "10px 14px", fontSize: "11px",
+          color: sortBy === col ? C.accent : C.muted,
+          letterSpacing: "1.2px", textTransform: "uppercase",
+          textAlign: right ? "right" : "left",
+          borderBottom: `1px solid ${C.border}`,
+          cursor: "pointer", userSelect: "none", whiteSpace: "nowrap",
+          background: C.card, position: "sticky", top: 0, zIndex: 1,
+        }}>
+          {label} {sortBy === col ? (sortDir === 1 ? "↑" : "↓") : ""}
+        </th>
+      );
+
+      const pill = (text, color, bg) => (
+        <span style={{ background: bg, color, border: `1px solid ${color}44`, borderRadius: "5px", padding: "2px 8px", fontSize: "11px", fontWeight: 600 }}>
+          {text}
+        </span>
+      );
+
+      return (
+        <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'IBM Plex Mono','Fira Code',monospace" }}>
+
+          {/* HEADER */}
+          <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: "18px 28px", display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            <span style={{ fontSize: "20px" }}>📊</span>
+            <div>
+              <div style={{ fontSize: "18px", fontWeight: 700, color: C.accent }}>Control de Precios</div>
+              <div style={{ fontSize: "11px", color: C.muted, marginTop: "1px" }}>Loyverse · Ajuste por inflación · Solo lectura</div>
+            </div>
+            {items.length > 0 && (
+              <div style={{ marginLeft: "auto", background: C.accentDim, border: `1px solid ${C.accent}44`, borderRadius: "8px", padding: "6px 14px", fontSize: "12px", color: C.accent }}>
+                {items.length} productos cargados
+              </div>
+            )}
+          </div>
+
+          <div style={{ maxWidth: "1080px", margin: "0 auto", padding: "28px 20px" }}>
+
+            {/* CONFIG */}
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: "12px", padding: "22px", marginBottom: "20px" }}>
+              <div style={{ fontSize: "11px", color: C.muted, letterSpacing: "2px", textTransform: "uppercase", marginBottom: "16px" }}>⚙ Configuración</div>
+              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "flex-end" }}>
+
+                <div style={{ flex: 2, minWidth: "240px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "11px", color: C.muted }}>Token de API Loyverse</label>
+                  <input type="password" placeholder="Pegá tu token aquí..." value={token}
+                    onChange={(e) => setToken(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && fetchProducts()}
+                    style={inp()} />
+                </div>
+
+                <div style={{ flex: 1, minWidth: "130px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "11px", color: C.muted }}>Inflación del mes (%)</label>
+                  <input type="number" min="0" step="0.1" placeholder="ej: 5" value={inflation}
+                    onChange={(e) => setInflation(e.target.value)}
+                    style={inp({ border: `1px solid ${C.accent}66`, color: C.accent, fontSize: "15px", fontWeight: 700 })} />
+                </div>
+
+                <div style={{ flex: 1, minWidth: "130px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "11px", color: C.muted }}>Redondear al múltiplo de $</label>
+                  <input type="number" min="1" step="1" placeholder="ej: 10" value={rounding}
+                    onChange={(e) => setRounding(e.target.value)}
+                    style={inp()} />
+                </div>
+
+                <button onClick={fetchProducts} disabled={loading}
+                  style={{ background: loading ? C.faint : C.accent, color: loading ? C.muted : "#111", border: "none", borderRadius: "8px", padding: "10px 20px", fontFamily: "inherit", fontSize: "13px", fontWeight: 700, cursor: loading ? "default" : "pointer", whiteSpace: "nowrap", height: "40px" }}>
+                  {loading ? "Cargando..." : "🔄 Traer productos"}
+                </button>
+              </div>
+
+              {error && (
+                <div style={{ marginTop: "14px", background: C.redDim, border: `1px solid ${C.red}44`, borderRadius: "8px", padding: "10px 14px", color: C.red, fontSize: "12px" }}>
+                  ⚠ {error}
+                </div>
+              )}
+              <div style={{ marginTop: "12px", fontSize: "11px", color: C.faint }}>
+                Token en Loyverse Back Office → Configuración → Acceso API →{" "}
+                <a href="https://help.loyverse.com/help/loyverse-api" target="_blank" rel="noreferrer">Ver guía</a>
+                {"   ·   "}
+                <span style={{ color: C.green }}>🔒 Esta app no modifica nada en Loyverse</span>
+              </div>
+            </div>
+
+            {/* SUMMARY CARDS */}
+            {items.length > 0 && pct > 0 && (
+              <div style={{ display: "flex", gap: "12px", marginBottom: "20px", flexWrap: "wrap" }}>
+                {[
+                  { label: "Inflación aplicada", value: `+${pct}%`, color: C.accent, bg: C.accentDim },
+                  { label: "Total precios actuales", value: fmt(totalCurrent), color: C.muted, bg: C.card },
+                  { label: "Total precios sugeridos", value: fmt(totalSuggested), color: C.green, bg: C.greenDim },
+                  { label: "Diferencia total", value: fmt(totalSuggested - totalCurrent), color: C.accent, bg: C.accentDim },
+                ].map(({ label, value, color, bg }) => (
+                  <div key={label} style={{ flex: 1, minWidth: "160px", background: bg, border: `1px solid ${color}33`, borderRadius: "12px", padding: "16px 18px" }}>
+                    <div style={{ fontSize: "11px", color: C.muted, marginBottom: "6px" }}>{label}</div>
+                    <div style={{ fontSize: "20px", fontWeight: 700, color }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* TABLE */}
+            {items.length > 0 && (
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: "12px", overflow: "hidden" }}>
+                <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+                  <div style={{ fontSize: "11px", color: C.muted, letterSpacing: "2px", textTransform: "uppercase" }}>
+                    📋 Productos · {filtered.length}{filtered.length !== items.length ? ` de ${items.length}` : ""}
+                  </div>
+                  <input placeholder="Buscar por nombre, variante o SKU..." value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    style={inp({ fontSize: "12px", padding: "7px 12px", width: "240px" })} />
+                </div>
+
+                <div style={{ overflowX: "auto", maxHeight: "520px", overflowY: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr>
+                        <Th col="name" label="Producto" />
+                        <Th col="variant" label="Variante" />
+                        <Th col="sku" label="SKU" />
+                        <Th col="price" label="Precio actual" right />
+                        <Th col="suggested" label={pct > 0 ? `Sugerido +${pct}%` : "Precio sugerido"} right />
+                        <Th col="diff" label="Diferencia" right />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtered.map((item, idx) => {
+                        const sp = suggested(item.price);
+                        const diff = sp != null && item.price != null ? sp - item.price : null;
+                        const dp = item.price ? ((sp - item.price) / item.price) * 100 : 0;
+                        return (
+                          <tr key={item.variantId} style={{ background: idx % 2 === 0 ? "transparent" : C.surface + "55" }}>
+                            <td style={{ padding: "11px 14px", fontSize: "13px", fontWeight: 600, color: C.text, borderBottom: `1px solid ${C.border}22` }}>
+                              {item.name}
+                            </td>
+                            <td style={{ padding: "11px 14px", fontSize: "12px", color: C.muted, borderBottom: `1px solid ${C.border}22` }}>
+                              {item.variant || "—"}
+                            </td>
+                            <td style={{ padding: "11px 14px", fontSize: "11px", color: C.faint, borderBottom: `1px solid ${C.border}22` }}>
+                              {item.sku || "—"}
+                            </td>
+                            <td style={{ padding: "11px 14px", fontSize: "13px", textAlign: "right", color: C.text, borderBottom: `1px solid ${C.border}22` }}>
+                              {fmt(item.price)}
+                            </td>
+                            <td style={{ padding: "11px 14px", fontSize: "14px", fontWeight: 700, textAlign: "right", color: pct > 0 ? C.accent : C.text, borderBottom: `1px solid ${C.border}22` }}>
+                              {fmt(sp)}
+                            </td>
+                            <td style={{ padding: "11px 14px", textAlign: "right", borderBottom: `1px solid ${C.border}22` }}>
+                              {diff != null && pct > 0 ? (
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "3px" }}>
+                                  <span style={{ fontSize: "13px", fontWeight: 600, color: C.green }}>{fmt(diff)}</span>
+                                  {pill(`+${dp.toFixed(1)}%`, C.green, C.greenDim)}
+                                </div>
+                              ) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  {filtered.length === 0 && (
+                    <div style={{ textAlign: "center", padding: "50px", color: C.muted, fontSize: "13px" }}>
+                      No hay productos que coincidan.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* EMPTY STATE */}
+            {!loading && items.length === 0 && !error && (
+              <div style={{ background: C.card, border: `1px dashed ${C.border}`, borderRadius: "12px", padding: "70px 24px", textAlign: "center" }}>
+                <div style={{ fontSize: "42px", marginBottom: "14px" }}>📦</div>
+                <div style={{ fontSize: "15px", color: C.muted, marginBottom: "8px" }}>
+                  Ingresá tu token y el % de inflación, luego presioná "Traer productos"
+                </div>
+                <div style={{ fontSize: "12px", color: C.faint }}>
+                  🔒 Solo lectura — no se modifica nada en Loyverse
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
