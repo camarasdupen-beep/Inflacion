@@ -24,11 +24,11 @@
   <script type="text/babel">
     const { useState, useCallback, useEffect } = React;
 
-    const PROXY        = "https://corsproxy.io/?";
-    const API_BASE     = `${PROXY}https://api.loyverse.com/v1.0`;
-    const INDEC_API    = `${PROXY}https://api.argentinadatos.com/v1/finanzas/indices/inflacion`;
-    const LS_HISTORY   = "loyverse_price_history";   // { variantId: { price, changedAt } }
-    const LS_SNAPSHOT  = "loyverse_price_snapshot";  // { variantId: price }
+    const PROXY       = "https://corsproxy.io/?";
+    const API_BASE    = `${PROXY}https://api.loyverse.com/v1.0`;
+    const INDEC_API   = `${PROXY}https://api.argentinadatos.com/v1/finanzas/indices/inflacion`;
+    const LS_HISTORY  = "loyverse_price_history";
+    const LS_SNAPSHOT = "loyverse_price_snapshot";
 
     const C = {
       bg:"#0d1117", surface:"#161b22", card:"#1c2230", border:"#30363d",
@@ -55,112 +55,156 @@
     };
     const saveJSON = (key, val) => localStorage.setItem(key, JSON.stringify(val));
 
-    // ── snapshot logic ────────────────────────────────────────────────────────
-    // Returns updated history after comparing new prices vs saved snapshot
+    // ── snapshot: detecta cambios de precio automáticamente ──────────────────
     function applySnapshot(flatItems, prevHistory) {
-      const snapshot  = loadJSON(LS_SNAPSHOT, {});
-      const now       = new Date().toISOString();
-      const newSnap   = {};
+      const snapshot   = loadJSON(LS_SNAPSHOT, {});
+      const now        = new Date().toISOString();
+      const newSnap    = {};
       const newHistory = { ...prevHistory };
-
       for (const item of flatItems) {
-        const vid      = item.variantId;
-        const curPrice = item.price;
-        newSnap[vid]   = curPrice;
-
-        const wasPrice = snapshot[vid];
-        // If price exists in snapshot AND changed → update history
-        if (wasPrice !== undefined && wasPrice !== curPrice) {
-          newHistory[vid] = { price: curPrice, changedAt: now };
+        const vid = item.variantId;
+        newSnap[vid] = item.price;
+        if (snapshot[vid] !== undefined && snapshot[vid] !== item.price) {
+          newHistory[vid] = { price: item.price, changedAt: now };
         }
-        // If no history entry yet, create one (first time seeing this item)
         if (!newHistory[vid]) {
-          newHistory[vid] = { price: curPrice, changedAt: null }; // null = never detected a change
+          newHistory[vid] = { price: item.price, changedAt: null };
         }
       }
-
       saveJSON(LS_SNAPSHOT, newSnap);
       saveJSON(LS_HISTORY, newHistory);
       return newHistory;
     }
 
-    // ── PDF export ────────────────────────────────────────────────────────────
-    function exportPDF(items, pct, roundTo, history, indecData) {
+    // ── PDF por categoría (proveedor), orden alfabético dentro de cada una ───
+    function exportPDF(items, catMap, pct, roundTo, history, indec) {
       const { jsPDF } = window.jspdf;
-      const doc  = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const doc   = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
       const pageW = doc.internal.pageSize.getWidth();
       const now   = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
 
-      const suggested = (price) => {
+      const calc = (price) => {
         if (price == null) return null;
         const raw = price * (1 + pct / 100);
         return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
       };
+      const ar = (n) => n == null ? "—" : "$" + Number(n).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2});
 
-      // header block
+      // ── portada / encabezado ─────────────────────────────────────────────
       doc.setFillColor(28,34,48);
-      doc.rect(0,0,pageW,36,"F");
+      doc.rect(0,0,pageW,38,"F");
       doc.setTextColor(240,180,41);
       doc.setFontSize(17); doc.setFont("helvetica","bold");
-      doc.text("Control de Precios · Lista de ajuste", 14, 12);
+      doc.text("Control de Precios · Lista de ajuste", 14, 13);
       doc.setTextColor(180,190,200);
       doc.setFontSize(8); doc.setFont("helvetica","normal");
-      doc.text(`Inflación aplicada: +${pct}%   ·   Generado: ${now}   ·   Total productos: ${items.length}`, 14, 20);
-      if (indecData) {
-        doc.text(`IPC INDEC último dato: ${indecData.valor}% (${indecData.fecha})`, 14, 27);
+      doc.text(`Inflación aplicada: +${pct}%   ·   Generado: ${now}   ·   Total productos: ${items.length}`, 14, 21);
+      if (indec) doc.text(`IPC INDEC último dato: ${indec.valor}% (${indec.fecha})`, 14, 28);
+
+      // ── agrupar por categoría y ordenar ──────────────────────────────────
+      const groups = {};
+      for (const item of items) {
+        const catName = catMap[item.categoryId] || "Sin categoría";
+        if (!groups[catName]) groups[catName] = [];
+        groups[catName].push(item);
+      }
+      // orden alfabético de categorías
+      const sortedCats = Object.keys(groups).sort((a,b) => a.localeCompare(b));
+
+      // totales generales
+      const totalActual   = items.reduce((s,i) => s+(i.price||0), 0);
+      const totalSugerido = items.reduce((s,i) => s+(calc(i.price)||0), 0);
+
+      let startY = 42;
+
+      for (const catName of sortedCats) {
+        const catItems = groups[catName].slice().sort((a,b) => a.name.localeCompare(b.name));
+
+        const catActual   = catItems.reduce((s,i) => s+(i.price||0), 0);
+        const catSugerido = catItems.reduce((s,i) => s+(calc(i.price)||0), 0);
+
+        const rows = catItems.map(item => {
+          const sp   = calc(item.price);
+          const diff = sp != null && item.price != null ? sp - item.price : null;
+          const dp   = item.price && sp ? ((sp-item.price)/item.price*100).toFixed(1)+"%" : "—";
+          const h    = history[item.variantId];
+          const upd  = h?.changedAt ? fmtDate(h.changedAt) : "Sin cambios";
+          return [
+            item.name,
+            item.price != null ? ar(item.price) : "—",
+            sp != null ? ar(sp) : "—",
+            diff != null ? "+"+ar(diff) : "—",
+            dp,
+            upd,
+          ];
+        });
+
+        doc.autoTable({
+          startY,
+          head: [[
+            { content: `📦 ${catName}  (${catItems.length} productos)`, colSpan: 6,
+              styles: { fillColor:[28,34,48], textColor:[240,180,41], fontStyle:"bold", fontSize:10, cellPadding:4 } },
+          ],[
+            "Producto","Precio actual","Precio sugerido","Diferencia","% subida","Últ. cambio"
+          ]],
+          body: rows,
+          foot: [[
+            { content:`Subtotal ${catName}`, styles:{fontStyle:"bold"} },
+            { content: ar(catActual),   styles:{halign:"right",fontStyle:"bold"} },
+            { content: ar(catSugerido), styles:{halign:"right",fontStyle:"bold",textColor:[63,185,80]} },
+            { content: "+"+ar(catSugerido-catActual), styles:{halign:"right",fontStyle:"bold",textColor:[63,185,80]} },
+            "","",
+          ]],
+          theme: "grid",
+          styles: { fontSize:8, cellPadding:2.5, textColor:[30,34,48] },
+          headStyles: { fillColor:[45,55,80], textColor:[200,210,230], fontStyle:"bold", fontSize:8 },
+          footStyles: { fillColor:[235,245,235], textColor:[20,20,20] },
+          alternateRowStyles: { fillColor:[245,247,250] },
+          columnStyles:{
+            0:{ cellWidth:62 },
+            1:{ halign:"right", cellWidth:26 },
+            2:{ halign:"right", cellWidth:26 },
+            3:{ halign:"right", cellWidth:26 },
+            4:{ halign:"center", cellWidth:16 },
+            5:{ cellWidth:37, fontSize:7 },
+          },
+          margin: { top: 14 },
+          didDrawPage: (data) => { startY = data.cursor.y; },
+        });
+
+        startY = doc.lastAutoTable.finalY + 6;
       }
 
-      const totalActual   = items.reduce((s,i) => s+(i.price||0), 0);
-      const totalSugerido = items.reduce((s,i) => s+(suggested(i.price)||0), 0);
-
-      const rows = items.map((item) => {
-        const sp   = suggested(item.price);
-        const diff = sp != null && item.price != null ? sp - item.price : null;
-        const dp   = item.price && sp ? ((sp-item.price)/item.price*100).toFixed(1)+"%" : "—";
-        const h    = history[item.variantId];
-        const upd  = h?.changedAt ? fmtDate(h.changedAt) : "Sin cambios detectados";
-        return [
-          item.name,
-          item.price != null ? "$"+Number(item.price).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
-          sp != null ? "$"+Number(sp).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
-          diff != null ? "+$"+Number(diff).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
-          dp,
-          upd,
-        ];
-      });
-
+      // ── fila de totales generales ─────────────────────────────────────────
       doc.autoTable({
-        startY: 40,
-        head: [["Producto","Precio actual","Precio sugerido","Diferencia","% subida","Últ. cambio detectado"]],
-        body: rows,
-        foot: [[
-          "TOTALES",
-          "$"+Number(totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
-          "$"+Number(totalSugerido).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
-          "+$"+Number(totalSugerido-totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+        startY,
+        body: [[
+          { content:"TOTAL GENERAL", styles:{fontStyle:"bold",fontSize:9} },
+          { content: ar(totalActual),   styles:{halign:"right",fontStyle:"bold",fontSize:9} },
+          { content: ar(totalSugerido), styles:{halign:"right",fontStyle:"bold",fontSize:9,textColor:[63,185,80]} },
+          { content: "+"+ar(totalSugerido-totalActual), styles:{halign:"right",fontStyle:"bold",fontSize:9,textColor:[63,185,80]} },
           "","",
         ]],
         theme:"grid",
-        styles:{ fontSize:8, cellPadding:2.5, textColor:[30,34,48] },
-        headStyles:{ fillColor:[28,34,48], textColor:[240,180,41], fontStyle:"bold", fontSize:8 },
-        footStyles:{ fillColor:[240,180,41], textColor:[20,20,20], fontStyle:"bold" },
-        alternateRowStyles:{ fillColor:[245,247,250] },
+        styles:{ fillColor:[240,180,41], textColor:[20,20,20], cellPadding:3 },
         columnStyles:{
           0:{ cellWidth:62 },
-          1:{ halign:"right", cellWidth:27 },
-          2:{ halign:"right", cellWidth:27 },
-          3:{ halign:"right", cellWidth:27 },
-          4:{ halign:"center", cellWidth:18 },
-          5:{ cellWidth:38, fontSize:7 },
+          1:{ cellWidth:26 },
+          2:{ cellWidth:26 },
+          3:{ cellWidth:26 },
+          4:{ cellWidth:16 },
+          5:{ cellWidth:37 },
         },
       });
 
+      // ── numeración de páginas ─────────────────────────────────────────────
       const pageCount = doc.internal.getNumberOfPages();
       for (let i=1; i<=pageCount; i++) {
         doc.setPage(i);
         doc.setFontSize(8); doc.setTextColor(160,160,160);
         doc.text(`Pág. ${i} de ${pageCount}`, pageW-14, doc.internal.pageSize.getHeight()-8, {align:"right"});
       }
+
       doc.save(`precios_sugeridos_${pct}pct_${now.replace(/\//g,"-")}.pdf`);
     }
 
@@ -172,11 +216,12 @@
       const [loading,   setLoading]   = useState(false);
       const [error,     setError]     = useState("");
       const [items,     setItems]     = useState([]);
+      const [catMap,    setCatMap]    = useState({});  // { categoryId: categoryName }
       const [filter,    setFilter]    = useState("");
-      const [sortBy,    setSortBy]    = useState("name");
+      const [sortBy,    setSortBy]    = useState("category");
       const [sortDir,   setSortDir]   = useState(1);
       const [history,   setHistory]   = useState(() => loadJSON(LS_HISTORY, {}));
-      const [indec,     setIndec]     = useState(null);   // { valor, fecha }
+      const [indec,     setIndec]     = useState(null);
       const [indecLoad, setIndecLoad] = useState(false);
 
       const pct     = parseFloat(inflation) || 0;
@@ -188,31 +233,39 @@
         return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
       };
 
-      // ── fetch INDEC inflation on mount ────────────────────────────────────
+      // ── fetch INDEC ───────────────────────────────────────────────────────
       useEffect(() => {
         setIndecLoad(true);
         fetch(INDEC_API)
-          .then(r => r.json())
+          .then(r=>r.json())
           .then(data => {
             if (Array.isArray(data) && data.length > 0) {
-              const last = data[data.length - 1];
-              // format: { fecha: "2026-03-01", valor: 3.7 }
-              const d    = new Date(last.fecha + "T12:00:00");
+              const last = data[data.length-1];
+              const d    = new Date(last.fecha+"T12:00:00");
               const mes  = d.toLocaleDateString("es-AR",{month:"long",year:"numeric"});
               setIndec({ valor: last.valor, fecha: mes });
-              // Pre-fill inflation field with INDEC value
               setInflation(String(last.valor));
             }
           })
-          .catch(() => {}) // silent fail
-          .finally(() => setIndecLoad(false));
+          .catch(()=>{})
+          .finally(()=>setIndecLoad(false));
       }, []);
 
-      // ── fetch all products ────────────────────────────────────────────────
+      // ── fetch productos + categorías ──────────────────────────────────────
       const fetchProducts = useCallback(async () => {
         if (!token.trim()) { setError("Ingresá tu token de Loyverse."); return; }
         setLoading(true); setError(""); setItems([]);
         try {
+          // 1. categorías
+          const catRes  = await fetch(`${API_BASE}/categories?limit=250`, {
+            headers:{ Authorization:`Bearer ${token.trim()}` }
+          });
+          const catData = catRes.ok ? await catRes.json() : { categories:[] };
+          const cm = {};
+          for (const c of catData.categories || []) cm[c.id] = c.name;
+          setCatMap(cm);
+
+          // 2. productos (paginado)
           let all = [], cursor = null;
           do {
             const url = `${API_BASE}/items?limit=250` + (cursor ? `&cursor=${cursor}` : "");
@@ -226,10 +279,12 @@
           const flat = [];
           for (const item of all)
             for (const v of item.variants || [])
-              flat.push({ id:item.id, variantId:v.id, name:item.item_name,
-                price:v.default_price, cost:v.cost??null, sku:v.sku||"" });
+              flat.push({
+                id:item.id, variantId:v.id, name:item.item_name,
+                categoryId: item.category_id || null,
+                price:v.default_price, cost:v.cost??null, sku:v.sku||""
+              });
 
-          // ── apply snapshot comparison ─────────────────────────────────────
           const updatedHistory = applySnapshot(flat, loadJSON(LS_HISTORY, {}));
           setHistory(updatedHistory);
           setItems(flat);
@@ -243,22 +298,27 @@
         else { setSortBy(col); setSortDir(1); }
       };
 
+      const getCatName = (id) => catMap[id] || "Sin categoría";
+
       const filtered = items
         .filter(i => {
           if (!filter) return true;
           const q = filter.toLowerCase();
-          return i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q);
+          return i.name.toLowerCase().includes(q)
+              || i.sku.toLowerCase().includes(q)
+              || getCatName(i.categoryId).toLowerCase().includes(q);
         })
         .sort((a,b) => {
           let va = a[sortBy], vb = b[sortBy];
           if (sortBy==="suggested") { va=suggested(a.price); vb=suggested(b.price); }
           if (sortBy==="diff")      { va=(suggested(a.price)||0)-(a.price||0); vb=(suggested(b.price)||0)-(b.price||0); }
-          if (sortBy==="changed")   {
-            va = history[a.variantId]?.changedAt || "";
-            vb = history[b.variantId]?.changedAt || "";
-          }
+          if (sortBy==="changed")   { va=history[a.variantId]?.changedAt||""; vb=history[b.variantId]?.changedAt||""; }
+          if (sortBy==="category")  { va=getCatName(a.categoryId); vb=getCatName(b.categoryId); }
           if (va==null) return 1; if (vb==null) return -1;
-          return typeof va==="string" ? va.localeCompare(vb)*sortDir : (va-vb)*sortDir;
+          const cmp = typeof va==="string" ? va.localeCompare(vb) : (va-vb);
+          if (cmp !== 0) return cmp * sortDir;
+          // secondary: alphabetical by name
+          return a.name.localeCompare(b.name);
         });
 
       const totalCurrent   = items.reduce((s,i)=>s+(i.price||0),0);
@@ -270,13 +330,12 @@
         padding:"10px 13px", color:C.text, fontSize:"13px",
         fontFamily:"'IBM Plex Mono','Fira Code',monospace", outline:"none", width:"100%", ...extra,
       });
-
       const Th = ({col,label,right}) => (
         <th onClick={()=>handleSort(col)} style={{
           padding:"10px 14px", fontSize:"11px",
-          color: sortBy===col ? C.accent : C.muted,
+          color:sortBy===col?C.accent:C.muted,
           letterSpacing:"1.2px", textTransform:"uppercase",
-          textAlign: right?"right":"left",
+          textAlign:right?"right":"left",
           borderBottom:`1px solid ${C.border}`,
           cursor:"pointer", userSelect:"none", whiteSpace:"nowrap",
           background:C.card, position:"sticky", top:0, zIndex:1,
@@ -284,12 +343,14 @@
           {label} {sortBy===col?(sortDir===1?"↑":"↓"):""}
         </th>
       );
-
       const pill = (text,color,bg) => (
         <span style={{background:bg,color,border:`1px solid ${color}44`,borderRadius:"5px",padding:"2px 8px",fontSize:"11px",fontWeight:600}}>
           {text}
         </span>
       );
+
+      // agrupar items filtrados para mostrar separadores de categoría en tabla
+      let lastCat = null;
 
       return (
         <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'IBM Plex Mono','Fira Code',monospace"}}>
@@ -303,7 +364,7 @@
             </div>
             {items.length > 0 && (
               <div style={{marginLeft:"auto",background:C.accentDim,border:`1px solid ${C.accent}44`,borderRadius:"8px",padding:"6px 14px",fontSize:"12px",color:C.accent}}>
-                {items.length} productos
+                {items.length} productos · {Object.keys(catMap).length} categorías
               </div>
             )}
           </div>
@@ -312,10 +373,9 @@
 
             {/* INDEC BANNER */}
             <div style={{
-              background: indec ? C.blueDim : C.card,
-              border:`1px solid ${indec ? C.blue+"66" : C.border}`,
-              borderRadius:"10px", padding:"14px 18px",
-              marginBottom:"16px",
+              background:indec?C.blueDim:C.card,
+              border:`1px solid ${indec?C.blue+"66":C.border}`,
+              borderRadius:"10px", padding:"14px 18px", marginBottom:"16px",
               display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap",
             }}>
               <span style={{fontSize:"18px"}}>🏛</span>
@@ -323,23 +383,17 @@
                 <div style={{fontSize:"11px",color:C.muted,letterSpacing:"1px",textTransform:"uppercase",marginBottom:"3px"}}>
                   IPC INDEC · Último dato oficial
                 </div>
-                {indecLoad ? (
-                  <div style={{fontSize:"13px",color:C.muted}}>Cargando dato oficial...</div>
-                ) : indec ? (
-                  <div style={{display:"flex",alignItems:"baseline",gap:"10px",flexWrap:"wrap"}}>
-                    <span style={{fontSize:"26px",fontWeight:700,color:C.blue}}>+{indec.valor}%</span>
-                    <span style={{fontSize:"13px",color:C.muted}}>{indec.fecha} · Fuente: INDEC vía ArgentinaDatos</span>
-                  </div>
-                ) : (
-                  <div style={{fontSize:"13px",color:C.muted}}>No se pudo cargar el dato del INDEC</div>
-                )}
+                {indecLoad
+                  ? <div style={{fontSize:"13px",color:C.muted}}>Cargando dato oficial...</div>
+                  : indec
+                    ? <div style={{display:"flex",alignItems:"baseline",gap:"10px",flexWrap:"wrap"}}>
+                        <span style={{fontSize:"26px",fontWeight:700,color:C.blue}}>+{indec.valor}%</span>
+                        <span style={{fontSize:"13px",color:C.muted}}>{indec.fecha} · Fuente: INDEC vía ArgentinaDatos</span>
+                      </div>
+                    : <div style={{fontSize:"13px",color:C.muted}}>No se pudo cargar el dato del INDEC</div>
+                }
               </div>
-              {indec && (
-                <div style={{marginLeft:"auto",fontSize:"11px",color:C.muted,textAlign:"right"}}>
-                  <div>Se usó como valor</div>
-                  <div>inicial de inflación ↓</div>
-                </div>
-              )}
+              {indec && <div style={{marginLeft:"auto",fontSize:"11px",color:C.muted,textAlign:"right"}}><div>Precargado</div><div>en el campo ↓</div></div>}
             </div>
 
             {/* CONFIG */}
@@ -382,7 +436,7 @@
                 Token en Loyverse Back Office → Configuración → Acceso API →{" "}
                 <a href="https://help.loyverse.com/help/loyverse-api" target="_blank" rel="noreferrer">Ver guía</a>
                 {"   ·   "}
-                <span style={{color:C.green}}>🔒 Solo lectura · Los cambios de precio se detectan automáticamente</span>
+                <span style={{color:C.green}}>🔒 Solo lectura · Cambios de precio detectados automáticamente</span>
               </div>
             </div>
 
@@ -406,41 +460,42 @@
             {/* TOOLBAR */}
             {items.length > 0 && (
               <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
-                <input placeholder="Buscar por nombre o SKU..." value={filter}
+                <input placeholder="Buscar por nombre, SKU o categoría..." value={filter}
                   onChange={e=>setFilter(e.target.value)}
-                  style={inp({fontSize:"12px",padding:"7px 12px",width:"230px"})} />
+                  style={inp({fontSize:"12px",padding:"7px 12px",width:"260px"})} />
                 <span style={{fontSize:"12px",color:C.muted}}>
-                  {filtered.length!==items.length ? `${filtered.length} de ${items.length}` : `${items.length}`} productos
+                  {filtered.length!==items.length?`${filtered.length} de ${items.length}`:`${items.length}`} productos
                 </span>
                 <div style={{marginLeft:"auto"}}>
                   <button
-                    onClick={()=>exportPDF(items,pct,roundTo,history,indec)}
+                    onClick={()=>exportPDF(items,catMap,pct,roundTo,history,indec)}
                     disabled={pct===0}
-                    title={pct===0?"Ingresá un % de inflación primero":"Exportar lista completa a PDF"}
+                    title={pct===0?"Ingresá un % de inflación primero":"Exportar por categoría a PDF"}
                     style={{
                       background:pct===0?C.faint:C.red, color:pct===0?C.muted:"#fff",
                       border:"none", borderRadius:"8px", padding:"9px 18px",
                       fontFamily:"inherit", fontSize:"13px", fontWeight:700,
                       cursor:pct===0?"default":"pointer", whiteSpace:"nowrap",
                     }}>
-                    📄 Exportar PDF
+                    📄 Exportar PDF por proveedor
                   </button>
                 </div>
               </div>
             )}
 
-            {/* TABLE */}
+            {/* TABLE con separadores de categoría */}
             {items.length > 0 && (
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",overflow:"hidden"}}>
-                <div style={{overflowX:"auto",maxHeight:"560px",overflowY:"auto"}}>
+                <div style={{overflowX:"auto",maxHeight:"600px",overflowY:"auto"}}>
                   <table style={{width:"100%",borderCollapse:"collapse"}}>
                     <thead>
                       <tr>
+                        <Th col="category"  label="Proveedor" />
                         <Th col="name"      label="Producto" />
-                        <Th col="price"     label="Precio actual"     right />
+                        <Th col="price"     label="Precio actual"      right />
                         <Th col="suggested" label={`Sugerido +${pct}%`} right />
-                        <Th col="diff"      label="Diferencia"        right />
-                        <Th col="changed"   label="Últ. cambio detectado" />
+                        <Th col="diff"      label="Diferencia"         right />
+                        <Th col="changed"   label="Últ. cambio" />
                       </tr>
                     </thead>
                     <tbody>
@@ -450,21 +505,25 @@
                         const dp      = item.price ? ((sp-item.price)/item.price)*100 : 0;
                         const h       = history[item.variantId];
                         const changed = h?.changedAt;
+                        const catName = getCatName(item.categoryId);
 
                         return (
                           <tr key={item.variantId}
                             style={{background:idx%2===0?"transparent":C.surface+"44"}}>
-                            <td style={{padding:"11px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`}}>
+                            <td style={{padding:"10px 14px",fontSize:"11px",color:C.blue,fontWeight:600,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap",maxWidth:"130px",overflow:"hidden",textOverflow:"ellipsis"}}>
+                              {catName}
+                            </td>
+                            <td style={{padding:"10px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`}}>
                               {item.name}
                               {item.sku && <span style={{marginLeft:"8px",fontSize:"10px",color:C.faint,fontWeight:400}}>{item.sku}</span>}
                             </td>
-                            <td style={{padding:"11px 14px",fontSize:"13px",textAlign:"right",color:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                            <td style={{padding:"10px 14px",fontSize:"13px",textAlign:"right",color:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
                               {fmt(item.price)}
                             </td>
-                            <td style={{padding:"11px 14px",fontSize:"14px",fontWeight:700,textAlign:"right",color:pct>0?C.accent:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                            <td style={{padding:"10px 14px",fontSize:"14px",fontWeight:700,textAlign:"right",color:pct>0?C.accent:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
                               {fmt(sp)}
                             </td>
-                            <td style={{padding:"11px 14px",textAlign:"right",borderBottom:`1px solid ${C.border}22`}}>
+                            <td style={{padding:"10px 14px",textAlign:"right",borderBottom:`1px solid ${C.border}22`}}>
                               {diff!=null && pct>0 ? (
                                 <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:"3px"}}>
                                   <span style={{fontSize:"13px",fontWeight:600,color:C.green,whiteSpace:"nowrap"}}>{fmt(diff)}</span>
@@ -472,10 +531,10 @@
                                 </div>
                               ) : "—"}
                             </td>
-                            <td style={{padding:"11px 14px",fontSize:"11px",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                            <td style={{padding:"10px 14px",fontSize:"11px",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
                               {changed
                                 ? <span style={{color:C.green}}>✓ {fmtDate(changed)}</span>
-                                : <span style={{color:C.faint}}>Sin cambios detectados</span>}
+                                : <span style={{color:C.faint}}>Sin cambios</span>}
                             </td>
                           </tr>
                         );
@@ -498,9 +557,9 @@
                 <div style={{fontSize:"15px",color:C.muted,marginBottom:"6px"}}>
                   Ingresá tu token y presioná "Traer productos"
                 </div>
-                <div style={{fontSize:"12px",color:C.faint,lineHeight:"1.6"}}>
-                  🔒 Solo lectura · Los cambios de precio se detectan automáticamente comparando<br/>
-                  con la última vez que cargaste los productos.
+                <div style={{fontSize:"12px",color:C.faint,lineHeight:"1.8"}}>
+                  🔒 Solo lectura · Cambios de precio detectados automáticamente<br/>
+                  📄 PDF exportado por proveedor en orden alfabético
                 </div>
               </div>
             )}
