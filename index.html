@@ -7,6 +7,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0d1117; }
@@ -15,18 +17,16 @@
     ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
     input[type=number]::-webkit-inner-spin-button { opacity: 0.5; }
     a { color: #58a6ff; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .spin { display: inline-block; animation: spin 0.8s linear infinite; }
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useCallback, useEffect } = React;
+    const { useState, useCallback } = React;
 
-    const PROXY     = "https://corsproxy.io/?";
-    const API_BASE  = `${PROXY}https://api.loyverse.com/v1.0`;
-    const LS_KEY    = "loyverse_price_updates";
+    const PROXY    = "https://corsproxy.io/?";
+    const API_BASE = `${PROXY}https://api.loyverse.com/v1.0`;
+    const LS_KEY   = "loyverse_price_updates";
 
     const C = {
       bg:"#0d1117", surface:"#161b22", card:"#1c2230", border:"#30363d",
@@ -44,37 +44,94 @@
       if (!iso) return null;
       const d = new Date(iso);
       return d.toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"})
-        + " " + d.toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"});
+           + " " + d.toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"});
     };
 
-    // ── load / save update history from localStorage ─────────────────────────
     const loadHistory = () => {
       try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); }
       catch { return {}; }
     };
-    const saveHistory = (h) => localStorage.setItem(LS_KEY, JSON.stringify(h));
 
-    // ── update a single item variant price in Loyverse ───────────────────────
-    async function pushPrice(token, item, newPrice) {
-      // 1. fetch full item
-      const getRes = await fetch(`${API_BASE}/items/${item.id}`, {
-        headers: { Authorization: `Bearer ${token}` },
+    // ── PDF export ────────────────────────────────────────────────────────────
+    function exportPDF(items, pct, history) {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+      const pageW = doc.internal.pageSize.getWidth();
+      const now   = new Date().toLocaleDateString("es-AR", {day:"2-digit",month:"2-digit",year:"numeric"});
+
+      // header
+      doc.setFillColor(28, 34, 48);
+      doc.rect(0, 0, pageW, 32, "F");
+      doc.setTextColor(240, 180, 41);
+      doc.setFontSize(18);
+      doc.setFont("helvetica","bold");
+      doc.text("Control de Precios", 14, 13);
+      doc.setTextColor(118, 131, 144);
+      doc.setFontSize(9);
+      doc.setFont("helvetica","normal");
+      doc.text(`Inflación aplicada: +${pct}%   ·   Generado: ${now}`, 14, 21);
+      doc.text(`Total de productos: ${items.length}`, 14, 27);
+
+      const suggested = (price) => {
+        if (price == null) return null;
+        return Math.round(price * (1 + pct / 100) * 100) / 100;
+      };
+
+      const totalActual    = items.reduce((s,i) => s + (i.price||0), 0);
+      const totalSugerido  = items.reduce((s,i) => s + (suggested(i.price)||0), 0);
+
+      const rows = items.map((item) => {
+        const sp   = suggested(item.price);
+        const diff = sp != null && item.price != null ? sp - item.price : null;
+        const dp   = item.price && sp ? ((sp - item.price) / item.price * 100).toFixed(1) + "%" : "—";
+        const upd  = history[item.variantId] ? fmtDate(history[item.variantId]) : "Sin registro";
+        return [
+          item.name,
+          item.price != null ? "$" + Number(item.price).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
+          sp != null ? "$" + Number(sp).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
+          diff != null ? "+$" + Number(diff).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
+          dp,
+          upd,
+        ];
       });
-      if (!getRes.ok) throw new Error(`GET ${getRes.status}`);
-      const full = await getRes.json();
 
-      // 2. patch the specific variant
-      const variants = full.variants.map((v) =>
-        v.id === item.variantId ? { ...v, default_price: newPrice } : v
-      );
-
-      // 3. PUT back
-      const putRes = await fetch(`${API_BASE}/items/${item.id}`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ ...full, variants }),
+      doc.autoTable({
+        startY: 36,
+        head: [["Producto","Precio actual","Precio sugerido","Diferencia","% subida","Últ. actualización"]],
+        body: rows,
+        foot: [[
+          "TOTALES",
+          "$" + Number(totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+          "$" + Number(totalSugerido).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+          "+$" + Number(totalSugerido - totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+          "","",
+        ]],
+        theme: "grid",
+        styles: { fontSize: 8, cellPadding: 2.5, textColor: [30,34,48], font: "helvetica" },
+        headStyles: { fillColor: [28,34,48], textColor: [240,180,41], fontStyle: "bold", fontSize: 8 },
+        footStyles: { fillColor: [240,180,41], textColor: [20,20,20], fontStyle: "bold", fontSize: 8 },
+        alternateRowStyles: { fillColor: [245,247,250] },
+        columnStyles: {
+          0: { cellWidth: 65 },
+          1: { halign: "right", cellWidth: 28 },
+          2: { halign: "right", cellWidth: 28 },
+          3: { halign: "right", cellWidth: 28 },
+          4: { halign: "center", cellWidth: 18 },
+          5: { cellWidth: 35, fontSize: 7 },
+        },
       });
-      if (!putRes.ok) throw new Error(`PUT ${putRes.status}: ${await putRes.text()}`);
+
+      // page numbers
+      const pageCount = doc.internal.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8);
+        doc.setTextColor(160,160,160);
+        doc.text(`Pág. ${i} de ${pageCount}`, pageW - 14, doc.internal.pageSize.getHeight() - 8, { align:"right" });
+      }
+
+      doc.save(`precios_sugeridos_${pct}pct_${now.replace(/\//g,"-")}.pdf`);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -88,10 +145,7 @@
       const [filter,    setFilter]    = useState("");
       const [sortBy,    setSortBy]    = useState("name");
       const [sortDir,   setSortDir]   = useState(1);
-      const [selected,  setSelected]  = useState(new Set());
-      const [updating,  setUpdating]  = useState(new Set()); // variantIds in flight
-      const [history,   setHistory]   = useState(loadHistory);
-      const [bulkStatus,setBulkStatus]= useState(""); // "running" | "done" | ""
+      const [history]                 = useState(loadHistory);
 
       const pct     = parseFloat(inflation) || 0;
       const roundTo = parseFloat(rounding)  || 1;
@@ -102,10 +156,9 @@
         return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
       };
 
-      // ── fetch all products ────────────────────────────────────────────────
       const fetchProducts = useCallback(async () => {
         if (!token.trim()) { setError("Ingresá tu token de Loyverse."); return; }
-        setLoading(true); setError(""); setItems([]); setSelected(new Set());
+        setLoading(true); setError(""); setItems([]);
         try {
           let all = [], cursor = null;
           do {
@@ -121,51 +174,12 @@
           for (const item of all)
             for (const v of item.variants || [])
               flat.push({ id:item.id, variantId:v.id, name:item.item_name,
-                variant:v.variant_name||"", price:v.default_price,
-                cost:v.cost??null, sku:v.sku||"" });
+                price:v.default_price, cost:v.cost??null, sku:v.sku||"" });
           setItems(flat);
         } catch(e) { setError(e.message); }
         finally    { setLoading(false); }
       }, [token]);
 
-      // ── update ONE item ───────────────────────────────────────────────────
-      const updateOne = async (item) => {
-        const sp = suggested(item.price);
-        if (sp == null) return;
-        setUpdating((prev) => new Set([...prev, item.variantId]));
-        try {
-          await pushPrice(token.trim(), item, sp);
-          const now = new Date().toISOString();
-          setHistory((prev) => {
-            const next = { ...prev, [item.variantId]: now };
-            saveHistory(next);
-            return next;
-          });
-          // refresh that item's price locally
-          setItems((prev) => prev.map((i) =>
-            i.variantId === item.variantId ? { ...i, price: sp } : i
-          ));
-        } catch(e) { alert("Error al actualizar: " + e.message); }
-        finally {
-          setUpdating((prev) => { const s = new Set(prev); s.delete(item.variantId); return s; });
-        }
-      };
-
-      // ── update MANY items (selected or all) ───────────────────────────────
-      const updateMany = async (targetIds) => {
-        if (!targetIds.length) return;
-        setBulkStatus("running");
-        for (const vid of targetIds) {
-          const item = items.find((i) => i.variantId === vid);
-          if (!item) continue;
-          await updateOne(item);
-          await new Promise((r) => setTimeout(r, 200)); // gentle rate limiting
-        }
-        setBulkStatus("done");
-        setTimeout(() => setBulkStatus(""), 3000);
-      };
-
-      // ── sort & filter ─────────────────────────────────────────────────────
       const handleSort = (col) => {
         if (sortBy === col) setSortDir((d) => -d);
         else { setSortBy(col); setSortDir(1); }
@@ -175,7 +189,7 @@
         .filter((i) => {
           if (!filter) return true;
           const q = filter.toLowerCase();
-          return i.name.toLowerCase().includes(q) || i.variant.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q);
+          return i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q);
         })
         .sort((a, b) => {
           let va = a[sortBy], vb = b[sortBy];
@@ -186,28 +200,15 @@
           return typeof va==="string" ? va.localeCompare(vb)*sortDir : (va-vb)*sortDir;
         });
 
-      const allIds     = filtered.map((i) => i.variantId);
-      const checkedInView = allIds.filter((id) => selected.has(id));
-      const allChecked = allIds.length > 0 && checkedInView.length === allIds.length;
-      const someChecked = checkedInView.length > 0 && !allChecked;
-      const toggleAll  = () => {
-        if (allChecked) setSelected((prev) => { const s=new Set(prev); allIds.forEach(id=>s.delete(id)); return s; });
-        else            setSelected((prev) => { const s=new Set(prev); allIds.forEach(id=>s.add(id)); return s; });
-      };
-      const toggle = (vid) => setSelected((prev) => {
-        const s = new Set(prev); s.has(vid) ? s.delete(vid) : s.add(vid); return s;
-      });
-
       const totalCurrent   = items.reduce((s,i)=>s+(i.price||0),0);
       const totalSuggested = items.reduce((s,i)=>s+(suggested(i.price)||0),0);
-      const selectedList   = allIds.filter(id => selected.has(id));
 
-      // ── style helpers ─────────────────────────────────────────────────────
       const inp = (extra={}) => ({
         background:C.surface, border:`1px solid ${C.border}`, borderRadius:"8px",
         padding:"10px 13px", color:C.text, fontSize:"13px",
         fontFamily:"'IBM Plex Mono','Fira Code',monospace", outline:"none", width:"100%", ...extra,
       });
+
       const Th = ({col,label,right}) => (
         <th onClick={()=>handleSort(col)} style={{
           padding:"10px 14px", fontSize:"11px",
@@ -221,6 +222,7 @@
           {label} {sortBy===col ? (sortDir===1?"↑":"↓") : ""}
         </th>
       );
+
       const pill = (text,color,bg) => (
         <span style={{background:bg,color,border:`1px solid ${color}44`,borderRadius:"5px",padding:"2px 8px",fontSize:"11px",fontWeight:600}}>
           {text}
@@ -235,7 +237,7 @@
             <span style={{fontSize:"20px"}}>📊</span>
             <div>
               <div style={{fontSize:"18px",fontWeight:700,color:C.accent}}>Control de Precios</div>
-              <div style={{fontSize:"11px",color:C.muted,marginTop:"1px"}}>Loyverse · Ajuste por inflación</div>
+              <div style={{fontSize:"11px",color:C.muted,marginTop:"1px"}}>Loyverse · Ajuste por inflación · Solo lectura</div>
             </div>
             {items.length > 0 && (
               <div style={{marginLeft:"auto",background:C.accentDim,border:`1px solid ${C.accent}44`,borderRadius:"8px",padding:"6px 14px",fontSize:"12px",color:C.accent}}>
@@ -282,6 +284,8 @@
               <div style={{marginTop:"10px",fontSize:"11px",color:C.faint}}>
                 Token en Loyverse Back Office → Configuración → Acceso API →{" "}
                 <a href="https://help.loyverse.com/help/loyverse-api" target="_blank" rel="noreferrer">Ver guía</a>
+                {"   ·   "}
+                <span style={{color:C.green}}>🔒 Solo lectura — no modifica Loyverse</span>
               </div>
             </div>
 
@@ -289,9 +293,9 @@
             {items.length > 0 && pct > 0 && (
               <div style={{display:"flex",gap:"10px",marginBottom:"16px",flexWrap:"wrap"}}>
                 {[
-                  {label:"Inflación aplicada",   value:`+${pct}%`,                  color:C.accent, bg:C.accentDim},
-                  {label:"Total actual",          value:fmt(totalCurrent),            color:C.muted,  bg:C.card},
-                  {label:"Total sugerido",        value:fmt(totalSuggested),          color:C.green,  bg:C.greenDim},
+                  {label:"Inflación aplicada",   value:`+${pct}%`,                      color:C.accent, bg:C.accentDim},
+                  {label:"Total actual",          value:fmt(totalCurrent),                color:C.muted,  bg:C.card},
+                  {label:"Total sugerido",        value:fmt(totalSuggested),              color:C.green,  bg:C.greenDim},
                   {label:"Diferencia total",      value:fmt(totalSuggested-totalCurrent), color:C.accent, bg:C.accentDim},
                 ].map(({label,value,color,bg})=>(
                   <div key={label} style={{flex:1,minWidth:"140px",background:bg,border:`1px solid ${color}33`,borderRadius:"12px",padding:"14px 16px"}}>
@@ -302,134 +306,87 @@
               </div>
             )}
 
-            {/* BULK ACTION BAR */}
+            {/* TABLE TOOLBAR */}
             {items.length > 0 && (
               <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
-                <span style={{fontSize:"12px",color:C.muted}}>
-                  {selectedList.length > 0 ? `${selectedList.length} seleccionados` : "Ninguno seleccionado"}
+                <input placeholder="Buscar por nombre o SKU..." value={filter}
+                  onChange={(e)=>setFilter(e.target.value)}
+                  style={inp({fontSize:"12px",padding:"7px 12px",width:"230px"})} />
+                <span style={{fontSize:"12px",color:C.muted,marginLeft:"4px"}}>
+                  {filtered.length !== items.length ? `${filtered.length} de ${items.length} productos` : `${items.length} productos`}
                 </span>
-                <div style={{marginLeft:"auto",display:"flex",gap:"8px",flexWrap:"wrap"}}>
-                  {selectedList.length > 0 && (
-                    <button
-                      onClick={()=>updateMany(selectedList)}
-                      disabled={bulkStatus==="running" || pct===0}
-                      style={{background:C.blue,color:"#fff",border:"none",borderRadius:"7px",padding:"8px 16px",fontFamily:"inherit",fontSize:"12px",fontWeight:700,cursor:"pointer"}}>
-                      {bulkStatus==="running" ? "⏳ Actualizando..." : `✅ Actualizar seleccionados (${selectedList.length})`}
-                    </button>
-                  )}
+                <div style={{marginLeft:"auto"}}>
                   <button
-                    onClick={()=>updateMany(allIds)}
-                    disabled={bulkStatus==="running" || pct===0 || allIds.length===0}
-                    style={{background:C.green,color:"#fff",border:"none",borderRadius:"7px",padding:"8px 16px",fontFamily:"inherit",fontSize:"12px",fontWeight:700,cursor:"pointer"}}>
-                    {bulkStatus==="running" ? "⏳ Actualizando..." : `🚀 Actualizar todos (${allIds.length})`}
+                    onClick={()=>exportPDF(items, pct, history)}
+                    disabled={pct===0}
+                    title={pct===0?"Ingresá un % de inflación primero":"Exportar lista completa a PDF"}
+                    style={{
+                      background: pct===0 ? C.faint : C.red,
+                      color: pct===0 ? C.muted : "#fff",
+                      border:"none", borderRadius:"8px",
+                      padding:"9px 18px", fontFamily:"inherit",
+                      fontSize:"13px", fontWeight:700,
+                      cursor: pct===0 ? "default" : "pointer",
+                      whiteSpace:"nowrap",
+                    }}>
+                    📄 Exportar PDF
                   </button>
                 </div>
-                {bulkStatus==="done" && (
-                  <div style={{width:"100%",fontSize:"12px",color:C.green}}>✓ Actualización masiva completada</div>
-                )}
-                {pct===0 && (
-                  <div style={{width:"100%",fontSize:"11px",color:C.faint}}>⚠ Ingresá un % de inflación para poder actualizar precios</div>
-                )}
               </div>
             )}
 
             {/* TABLE */}
             {items.length > 0 && (
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",overflow:"hidden"}}>
-                <div style={{padding:"14px 18px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px",flexWrap:"wrap"}}>
-                  <div style={{fontSize:"11px",color:C.muted,letterSpacing:"2px",textTransform:"uppercase"}}>
-                    📋 {filtered.length}{filtered.length!==items.length?` de ${items.length}`:""} productos
-                  </div>
-                  <input placeholder="Buscar por nombre, variante o SKU..." value={filter}
-                    onChange={(e)=>setFilter(e.target.value)}
-                    style={inp({fontSize:"12px",padding:"7px 12px",width:"230px"})} />
-                </div>
-
                 <div style={{overflowX:"auto",maxHeight:"560px",overflowY:"auto"}}>
                   <table style={{width:"100%",borderCollapse:"collapse"}}>
                     <thead>
                       <tr>
-                        <th style={{padding:"10px 12px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`}}>
-                          <input type="checkbox" checked={allChecked}
-                            ref={(el) => { if (el) el.indeterminate = someChecked; }}
-                            onChange={toggleAll} style={{cursor:"pointer"}} />
-                        </th>
                         <Th col="name"      label="Producto" />
-                        <Th col="variant"   label="Variante" />
-                        <Th col="price"     label="Precio actual"  right />
+                        <Th col="price"     label="Precio actual"     right />
                         <Th col="suggested" label={`Sugerido +${pct}%`} right />
-                        <Th col="diff"      label="Diferencia"     right />
-                        <Th col="updated"   label="Última actualización" />
-                        <th style={{padding:"10px 12px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",whiteSpace:"nowrap"}}>
-                          Acción
-                        </th>
+                        <Th col="diff"      label="Diferencia"        right />
+                        <Th col="updated"   label="Últ. actualización" />
                       </tr>
                     </thead>
                     <tbody>
                       {filtered.map((item, idx) => {
-                        const sp   = suggested(item.price);
-                        const diff = sp != null && item.price != null ? sp - item.price : null;
-                        const dp   = item.price ? ((sp - item.price) / item.price) * 100 : 0;
-                        const isUpdating = updating.has(item.variantId);
-                        const lastUpdate = history[item.variantId];
-                        const isSelected = selected.has(item.variantId);
+                        const sp      = suggested(item.price);
+                        const diff    = sp != null && item.price != null ? sp - item.price : null;
+                        const dp      = item.price ? ((sp - item.price) / item.price) * 100 : 0;
+                        const lastUpd = history[item.variantId];
 
                         return (
                           <tr key={item.variantId}
-                            style={{background: isSelected ? C.accentDim : idx%2===0 ? "transparent" : C.surface+"44",transition:"background .15s"}}>
-                            <td style={{padding:"10px 12px",borderBottom:`1px solid ${C.border}22`,textAlign:"center"}}>
-                              <input type="checkbox" checked={isSelected} onChange={()=>toggle(item.variantId)} style={{cursor:"pointer"}} />
-                            </td>
-                            <td style={{padding:"10px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                            style={{background: idx%2===0 ? "transparent" : C.surface+"44"}}>
+                            <td style={{padding:"11px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`}}>
                               {item.name}
+                              {item.sku && <span style={{marginLeft:"8px",fontSize:"10px",color:C.faint,fontWeight:400}}>{item.sku}</span>}
                             </td>
-                            <td style={{padding:"10px 14px",fontSize:"12px",color:C.muted,borderBottom:`1px solid ${C.border}22`}}>
-                              {item.variant||"—"}
-                            </td>
-                            <td style={{padding:"10px 14px",fontSize:"13px",textAlign:"right",color:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                            <td style={{padding:"11px 14px",fontSize:"13px",textAlign:"right",color:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
                               {fmt(item.price)}
                             </td>
-                            <td style={{padding:"10px 14px",fontSize:"14px",fontWeight:700,textAlign:"right",color:pct>0?C.accent:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                            <td style={{padding:"11px 14px",fontSize:"14px",fontWeight:700,textAlign:"right",color:pct>0?C.accent:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
                               {fmt(sp)}
                             </td>
-                            <td style={{padding:"10px 14px",textAlign:"right",borderBottom:`1px solid ${C.border}22`}}>
+                            <td style={{padding:"11px 14px",textAlign:"right",borderBottom:`1px solid ${C.border}22`}}>
                               {diff!=null && pct>0 ? (
                                 <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:"3px"}}>
-                                  <span style={{fontSize:"13px",fontWeight:600,color:C.green}}>{fmt(diff)}</span>
+                                  <span style={{fontSize:"13px",fontWeight:600,color:C.green,whiteSpace:"nowrap"}}>{fmt(diff)}</span>
                                   {pill(`+${dp.toFixed(1)}%`,C.green,C.greenDim)}
                                 </div>
                               ) : "—"}
                             </td>
-                            <td style={{padding:"10px 14px",fontSize:"11px",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
-                              {lastUpdate ? (
-                                <span style={{color:C.green}}>✓ {fmtDate(lastUpdate)}</span>
-                              ) : (
-                                <span style={{color:C.faint}}>Sin actualizar</span>
-                              )}
-                            </td>
-                            <td style={{padding:"10px 12px",borderBottom:`1px solid ${C.border}22`,textAlign:"center"}}>
-                              <button
-                                onClick={()=>updateOne(item)}
-                                disabled={isUpdating || pct===0}
-                                title={pct===0?"Ingresá un % de inflación primero":"Actualizar este precio en Loyverse"}
-                                style={{
-                                  background: isUpdating ? C.faint : C.accent,
-                                  color: isUpdating ? C.muted : "#111",
-                                  border:"none", borderRadius:"6px",
-                                  padding:"6px 12px", fontFamily:"inherit",
-                                  fontSize:"12px", fontWeight:700,
-                                  cursor: isUpdating||pct===0 ? "default" : "pointer",
-                                  whiteSpace:"nowrap", minWidth:"80px",
-                                }}>
-                                {isUpdating ? <span className="spin">⏳</span> : "↑ Subir"}
-                              </button>
+                            <td style={{padding:"11px 14px",fontSize:"11px",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                              {lastUpd
+                                ? <span style={{color:C.green}}>✓ {fmtDate(lastUpd)}</span>
+                                : <span style={{color:C.faint}}>Sin registro</span>}
                             </td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
-
                   {filtered.length === 0 && (
                     <div style={{textAlign:"center",padding:"50px",color:C.muted,fontSize:"13px"}}>
                       No hay productos que coincidan.
@@ -447,7 +404,7 @@
                   Ingresá tu token y el % de inflación, luego presioná "Traer productos"
                 </div>
                 <div style={{fontSize:"12px",color:C.faint}}>
-                  Las fechas de actualización se guardan en este navegador.
+                  🔒 Solo lectura — no modifica nada en Loyverse
                 </div>
               </div>
             )}
