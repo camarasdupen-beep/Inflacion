@@ -187,10 +187,12 @@
         });
 
       const allIds     = filtered.map((i) => i.variantId);
-      const allChecked = allIds.length > 0 && allIds.every((id) => selected.has(id));
+      const checkedInView = allIds.filter((id) => selected.has(id));
+      const allChecked = allIds.length > 0 && checkedInView.length === allIds.length;
+      const someChecked = checkedInView.length > 0 && !allChecked;
       const toggleAll  = () => {
         if (allChecked) setSelected((prev) => { const s=new Set(prev); allIds.forEach(id=>s.delete(id)); return s; });
-        else            setSelected((prev) => new Set([...prev, ...allIds]));
+        else            setSelected((prev) => { const s=new Set(prev); allIds.forEach(id=>s.add(id)); return s; });
       };
       const toggle = (vid) => setSelected((prev) => {
         const s = new Set(prev); s.has(vid) ? s.delete(vid) : s.add(vid); return s;
@@ -198,7 +200,7 @@
 
       const totalCurrent   = items.reduce((s,i)=>s+(i.price||0),0);
       const totalSuggested = items.reduce((s,i)=>s+(suggested(i.price)||0),0);
-      const selectedList   = [...selected].filter(id => items.find(i=>i.variantId===id));
+      const selectedList   = allIds.filter(id => selected.has(id));
 
       // ── style helpers ─────────────────────────────────────────────────────
       const inp = (extra={}) => ({
@@ -348,7 +350,9 @@
                     <thead>
                       <tr>
                         <th style={{padding:"10px 12px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`}}>
-                          <input type="checkbox" checked={allChecked} onChange={toggleAll} style={{cursor:"pointer"}} />
+                          <input type="checkbox" checked={allChecked}
+                            ref={(el) => { if (el) el.indeterminate = someChecked; }}
+                            onChange={toggleAll} style={{cursor:"pointer"}} />
                         </th>
                         <Th col="name"      label="Producto" />
                         <Th col="variant"   label="Variante" />
