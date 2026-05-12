@@ -22,19 +22,21 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useCallback } = React;
+    const { useState, useCallback, useEffect } = React;
 
-    const PROXY    = "https://corsproxy.io/?";
-    const API_BASE = `${PROXY}https://api.loyverse.com/v1.0`;
-    const LS_KEY   = "loyverse_price_updates";
+    const PROXY        = "https://corsproxy.io/?";
+    const API_BASE     = `${PROXY}https://api.loyverse.com/v1.0`;
+    const INDEC_API    = `${PROXY}https://api.argentinadatos.com/v1/finanzas/indices/inflacion`;
+    const LS_HISTORY   = "loyverse_price_history";   // { variantId: { price, changedAt } }
+    const LS_SNAPSHOT  = "loyverse_price_snapshot";  // { variantId: price }
 
     const C = {
       bg:"#0d1117", surface:"#161b22", card:"#1c2230", border:"#30363d",
       accent:"#f0b429", accentDim:"#f0b42918",
       green:"#3fb950",  greenDim:"#3fb95018",
       red:"#f85149",    redDim:"#f8514918",
-      blue:"#58a6ff",
-      text:"#e6edf3", muted:"#768390", faint:"#3d444d",
+      blue:"#58a6ff",   blueDim:"#58a6ff18",
+      text:"#e6edf3",   muted:"#768390",   faint:"#3d444d",
     };
 
     const fmt = (n) =>
@@ -47,90 +49,118 @@
            + " " + d.toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"});
     };
 
-    const loadHistory = () => {
-      try { return JSON.parse(localStorage.getItem(LS_KEY) || "{}"); }
-      catch { return {}; }
+    const loadJSON = (key, fallback) => {
+      try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; }
+      catch { return fallback; }
     };
+    const saveJSON = (key, val) => localStorage.setItem(key, JSON.stringify(val));
+
+    // ── snapshot logic ────────────────────────────────────────────────────────
+    // Returns updated history after comparing new prices vs saved snapshot
+    function applySnapshot(flatItems, prevHistory) {
+      const snapshot  = loadJSON(LS_SNAPSHOT, {});
+      const now       = new Date().toISOString();
+      const newSnap   = {};
+      const newHistory = { ...prevHistory };
+
+      for (const item of flatItems) {
+        const vid      = item.variantId;
+        const curPrice = item.price;
+        newSnap[vid]   = curPrice;
+
+        const wasPrice = snapshot[vid];
+        // If price exists in snapshot AND changed → update history
+        if (wasPrice !== undefined && wasPrice !== curPrice) {
+          newHistory[vid] = { price: curPrice, changedAt: now };
+        }
+        // If no history entry yet, create one (first time seeing this item)
+        if (!newHistory[vid]) {
+          newHistory[vid] = { price: curPrice, changedAt: null }; // null = never detected a change
+        }
+      }
+
+      saveJSON(LS_SNAPSHOT, newSnap);
+      saveJSON(LS_HISTORY, newHistory);
+      return newHistory;
+    }
 
     // ── PDF export ────────────────────────────────────────────────────────────
-    function exportPDF(items, pct, history) {
+    function exportPDF(items, pct, roundTo, history, indecData) {
       const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
-
+      const doc  = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
       const pageW = doc.internal.pageSize.getWidth();
-      const now   = new Date().toLocaleDateString("es-AR", {day:"2-digit",month:"2-digit",year:"numeric"});
-
-      // header
-      doc.setFillColor(28, 34, 48);
-      doc.rect(0, 0, pageW, 32, "F");
-      doc.setTextColor(240, 180, 41);
-      doc.setFontSize(18);
-      doc.setFont("helvetica","bold");
-      doc.text("Control de Precios", 14, 13);
-      doc.setTextColor(118, 131, 144);
-      doc.setFontSize(9);
-      doc.setFont("helvetica","normal");
-      doc.text(`Inflación aplicada: +${pct}%   ·   Generado: ${now}`, 14, 21);
-      doc.text(`Total de productos: ${items.length}`, 14, 27);
+      const now   = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
 
       const suggested = (price) => {
         if (price == null) return null;
-        return Math.round(price * (1 + pct / 100) * 100) / 100;
+        const raw = price * (1 + pct / 100);
+        return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
       };
 
-      const totalActual    = items.reduce((s,i) => s + (i.price||0), 0);
-      const totalSugerido  = items.reduce((s,i) => s + (suggested(i.price)||0), 0);
+      // header block
+      doc.setFillColor(28,34,48);
+      doc.rect(0,0,pageW,36,"F");
+      doc.setTextColor(240,180,41);
+      doc.setFontSize(17); doc.setFont("helvetica","bold");
+      doc.text("Control de Precios · Lista de ajuste", 14, 12);
+      doc.setTextColor(180,190,200);
+      doc.setFontSize(8); doc.setFont("helvetica","normal");
+      doc.text(`Inflación aplicada: +${pct}%   ·   Generado: ${now}   ·   Total productos: ${items.length}`, 14, 20);
+      if (indecData) {
+        doc.text(`IPC INDEC último dato: ${indecData.valor}% (${indecData.fecha})`, 14, 27);
+      }
+
+      const totalActual   = items.reduce((s,i) => s+(i.price||0), 0);
+      const totalSugerido = items.reduce((s,i) => s+(suggested(i.price)||0), 0);
 
       const rows = items.map((item) => {
         const sp   = suggested(item.price);
         const diff = sp != null && item.price != null ? sp - item.price : null;
-        const dp   = item.price && sp ? ((sp - item.price) / item.price * 100).toFixed(1) + "%" : "—";
-        const upd  = history[item.variantId] ? fmtDate(history[item.variantId]) : "Sin registro";
+        const dp   = item.price && sp ? ((sp-item.price)/item.price*100).toFixed(1)+"%" : "—";
+        const h    = history[item.variantId];
+        const upd  = h?.changedAt ? fmtDate(h.changedAt) : "Sin cambios detectados";
         return [
           item.name,
-          item.price != null ? "$" + Number(item.price).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
-          sp != null ? "$" + Number(sp).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
-          diff != null ? "+$" + Number(diff).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
+          item.price != null ? "$"+Number(item.price).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
+          sp != null ? "$"+Number(sp).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
+          diff != null ? "+$"+Number(diff).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}) : "—",
           dp,
           upd,
         ];
       });
 
       doc.autoTable({
-        startY: 36,
-        head: [["Producto","Precio actual","Precio sugerido","Diferencia","% subida","Últ. actualización"]],
+        startY: 40,
+        head: [["Producto","Precio actual","Precio sugerido","Diferencia","% subida","Últ. cambio detectado"]],
         body: rows,
         foot: [[
           "TOTALES",
-          "$" + Number(totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
-          "$" + Number(totalSugerido).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
-          "+$" + Number(totalSugerido - totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+          "$"+Number(totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+          "$"+Number(totalSugerido).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
+          "+$"+Number(totalSugerido-totalActual).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2}),
           "","",
         ]],
-        theme: "grid",
-        styles: { fontSize: 8, cellPadding: 2.5, textColor: [30,34,48], font: "helvetica" },
-        headStyles: { fillColor: [28,34,48], textColor: [240,180,41], fontStyle: "bold", fontSize: 8 },
-        footStyles: { fillColor: [240,180,41], textColor: [20,20,20], fontStyle: "bold", fontSize: 8 },
-        alternateRowStyles: { fillColor: [245,247,250] },
-        columnStyles: {
-          0: { cellWidth: 65 },
-          1: { halign: "right", cellWidth: 28 },
-          2: { halign: "right", cellWidth: 28 },
-          3: { halign: "right", cellWidth: 28 },
-          4: { halign: "center", cellWidth: 18 },
-          5: { cellWidth: 35, fontSize: 7 },
+        theme:"grid",
+        styles:{ fontSize:8, cellPadding:2.5, textColor:[30,34,48] },
+        headStyles:{ fillColor:[28,34,48], textColor:[240,180,41], fontStyle:"bold", fontSize:8 },
+        footStyles:{ fillColor:[240,180,41], textColor:[20,20,20], fontStyle:"bold" },
+        alternateRowStyles:{ fillColor:[245,247,250] },
+        columnStyles:{
+          0:{ cellWidth:62 },
+          1:{ halign:"right", cellWidth:27 },
+          2:{ halign:"right", cellWidth:27 },
+          3:{ halign:"right", cellWidth:27 },
+          4:{ halign:"center", cellWidth:18 },
+          5:{ cellWidth:38, fontSize:7 },
         },
       });
 
-      // page numbers
       const pageCount = doc.internal.getNumberOfPages();
-      for (let i = 1; i <= pageCount; i++) {
+      for (let i=1; i<=pageCount; i++) {
         doc.setPage(i);
-        doc.setFontSize(8);
-        doc.setTextColor(160,160,160);
-        doc.text(`Pág. ${i} de ${pageCount}`, pageW - 14, doc.internal.pageSize.getHeight() - 8, { align:"right" });
+        doc.setFontSize(8); doc.setTextColor(160,160,160);
+        doc.text(`Pág. ${i} de ${pageCount}`, pageW-14, doc.internal.pageSize.getHeight()-8, {align:"right"});
       }
-
       doc.save(`precios_sugeridos_${pct}pct_${now.replace(/\//g,"-")}.pdf`);
     }
 
@@ -145,7 +175,9 @@
       const [filter,    setFilter]    = useState("");
       const [sortBy,    setSortBy]    = useState("name");
       const [sortDir,   setSortDir]   = useState(1);
-      const [history]                 = useState(loadHistory);
+      const [history,   setHistory]   = useState(() => loadJSON(LS_HISTORY, {}));
+      const [indec,     setIndec]     = useState(null);   // { valor, fecha }
+      const [indecLoad, setIndecLoad] = useState(false);
 
       const pct     = parseFloat(inflation) || 0;
       const roundTo = parseFloat(rounding)  || 1;
@@ -156,6 +188,27 @@
         return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
       };
 
+      // ── fetch INDEC inflation on mount ────────────────────────────────────
+      useEffect(() => {
+        setIndecLoad(true);
+        fetch(INDEC_API)
+          .then(r => r.json())
+          .then(data => {
+            if (Array.isArray(data) && data.length > 0) {
+              const last = data[data.length - 1];
+              // format: { fecha: "2026-03-01", valor: 3.7 }
+              const d    = new Date(last.fecha + "T12:00:00");
+              const mes  = d.toLocaleDateString("es-AR",{month:"long",year:"numeric"});
+              setIndec({ valor: last.valor, fecha: mes });
+              // Pre-fill inflation field with INDEC value
+              setInflation(String(last.valor));
+            }
+          })
+          .catch(() => {}) // silent fail
+          .finally(() => setIndecLoad(false));
+      }, []);
+
+      // ── fetch all products ────────────────────────────────────────────────
       const fetchProducts = useCallback(async () => {
         if (!token.trim()) { setError("Ingresá tu token de Loyverse."); return; }
         setLoading(true); setError(""); setItems([]);
@@ -163,7 +216,7 @@
           let all = [], cursor = null;
           do {
             const url = `${API_BASE}/items?limit=250` + (cursor ? `&cursor=${cursor}` : "");
-            const res = await fetch(url, { headers: { Authorization: `Bearer ${token.trim()}` } });
+            const res = await fetch(url, { headers:{ Authorization:`Bearer ${token.trim()}` } });
             if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
             const data = await res.json();
             all = all.concat(data.items || []);
@@ -175,34 +228,43 @@
             for (const v of item.variants || [])
               flat.push({ id:item.id, variantId:v.id, name:item.item_name,
                 price:v.default_price, cost:v.cost??null, sku:v.sku||"" });
+
+          // ── apply snapshot comparison ─────────────────────────────────────
+          const updatedHistory = applySnapshot(flat, loadJSON(LS_HISTORY, {}));
+          setHistory(updatedHistory);
           setItems(flat);
         } catch(e) { setError(e.message); }
         finally    { setLoading(false); }
       }, [token]);
 
+      // ── sort & filter ─────────────────────────────────────────────────────
       const handleSort = (col) => {
-        if (sortBy === col) setSortDir((d) => -d);
+        if (sortBy===col) setSortDir(d=>-d);
         else { setSortBy(col); setSortDir(1); }
       };
 
       const filtered = items
-        .filter((i) => {
+        .filter(i => {
           if (!filter) return true;
           const q = filter.toLowerCase();
           return i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q);
         })
-        .sort((a, b) => {
+        .sort((a,b) => {
           let va = a[sortBy], vb = b[sortBy];
-          if (sortBy === "suggested") { va = suggested(a.price); vb = suggested(b.price); }
-          if (sortBy === "diff")      { va = (suggested(a.price)||0)-(a.price||0); vb = (suggested(b.price)||0)-(b.price||0); }
-          if (sortBy === "updated")   { va = history[a.variantId]||""; vb = history[b.variantId]||""; }
-          if (va == null) return 1; if (vb == null) return -1;
+          if (sortBy==="suggested") { va=suggested(a.price); vb=suggested(b.price); }
+          if (sortBy==="diff")      { va=(suggested(a.price)||0)-(a.price||0); vb=(suggested(b.price)||0)-(b.price||0); }
+          if (sortBy==="changed")   {
+            va = history[a.variantId]?.changedAt || "";
+            vb = history[b.variantId]?.changedAt || "";
+          }
+          if (va==null) return 1; if (vb==null) return -1;
           return typeof va==="string" ? va.localeCompare(vb)*sortDir : (va-vb)*sortDir;
         });
 
       const totalCurrent   = items.reduce((s,i)=>s+(i.price||0),0);
       const totalSuggested = items.reduce((s,i)=>s+(suggested(i.price)||0),0);
 
+      // ── style helpers ─────────────────────────────────────────────────────
       const inp = (extra={}) => ({
         background:C.surface, border:`1px solid ${C.border}`, borderRadius:"8px",
         padding:"10px 13px", color:C.text, fontSize:"13px",
@@ -219,7 +281,7 @@
           cursor:"pointer", userSelect:"none", whiteSpace:"nowrap",
           background:C.card, position:"sticky", top:0, zIndex:1,
         }}>
-          {label} {sortBy===col ? (sortDir===1?"↑":"↓") : ""}
+          {label} {sortBy===col?(sortDir===1?"↑":"↓"):""}
         </th>
       );
 
@@ -248,6 +310,38 @@
 
           <div style={{maxWidth:"1100px",margin:"0 auto",padding:"24px 16px"}}>
 
+            {/* INDEC BANNER */}
+            <div style={{
+              background: indec ? C.blueDim : C.card,
+              border:`1px solid ${indec ? C.blue+"66" : C.border}`,
+              borderRadius:"10px", padding:"14px 18px",
+              marginBottom:"16px",
+              display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap",
+            }}>
+              <span style={{fontSize:"18px"}}>🏛</span>
+              <div>
+                <div style={{fontSize:"11px",color:C.muted,letterSpacing:"1px",textTransform:"uppercase",marginBottom:"3px"}}>
+                  IPC INDEC · Último dato oficial
+                </div>
+                {indecLoad ? (
+                  <div style={{fontSize:"13px",color:C.muted}}>Cargando dato oficial...</div>
+                ) : indec ? (
+                  <div style={{display:"flex",alignItems:"baseline",gap:"10px",flexWrap:"wrap"}}>
+                    <span style={{fontSize:"26px",fontWeight:700,color:C.blue}}>+{indec.valor}%</span>
+                    <span style={{fontSize:"13px",color:C.muted}}>{indec.fecha} · Fuente: INDEC vía ArgentinaDatos</span>
+                  </div>
+                ) : (
+                  <div style={{fontSize:"13px",color:C.muted}}>No se pudo cargar el dato del INDEC</div>
+                )}
+              </div>
+              {indec && (
+                <div style={{marginLeft:"auto",fontSize:"11px",color:C.muted,textAlign:"right"}}>
+                  <div>Se usó como valor</div>
+                  <div>inicial de inflación ↓</div>
+                </div>
+              )}
+            </div>
+
             {/* CONFIG */}
             <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",padding:"20px",marginBottom:"20px"}}>
               <div style={{fontSize:"11px",color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginBottom:"14px"}}>⚙ Configuración</div>
@@ -255,25 +349,28 @@
                 <div style={{flex:2,minWidth:"220px",display:"flex",flexDirection:"column",gap:"5px"}}>
                   <label style={{fontSize:"11px",color:C.muted}}>Token de API Loyverse</label>
                   <input type="password" placeholder="Pegá tu token aquí..." value={token}
-                    onChange={(e)=>setToken(e.target.value)}
-                    onKeyDown={(e)=>e.key==="Enter"&&fetchProducts()}
+                    onChange={e=>setToken(e.target.value)}
+                    onKeyDown={e=>e.key==="Enter"&&fetchProducts()}
                     style={inp()} />
                 </div>
                 <div style={{flex:1,minWidth:"120px",display:"flex",flexDirection:"column",gap:"5px"}}>
-                  <label style={{fontSize:"11px",color:C.muted}}>Inflación del mes (%)</label>
+                  <label style={{fontSize:"11px",color:C.muted}}>
+                    Inflación a aplicar (%)
+                    {indec && <span style={{color:C.blue,marginLeft:"6px",fontSize:"10px"}}>← INDEC</span>}
+                  </label>
                   <input type="number" min="0" step="0.1" placeholder="ej: 5" value={inflation}
-                    onChange={(e)=>setInflation(e.target.value)}
+                    onChange={e=>setInflation(e.target.value)}
                     style={inp({border:`1px solid ${C.accent}66`,color:C.accent,fontSize:"15px",fontWeight:700})} />
                 </div>
                 <div style={{flex:1,minWidth:"120px",display:"flex",flexDirection:"column",gap:"5px"}}>
                   <label style={{fontSize:"11px",color:C.muted}}>Redondear al múltiplo de $</label>
                   <input type="number" min="1" step="1" placeholder="ej: 10" value={rounding}
-                    onChange={(e)=>setRounding(e.target.value)}
+                    onChange={e=>setRounding(e.target.value)}
                     style={inp()} />
                 </div>
                 <button onClick={fetchProducts} disabled={loading}
                   style={{background:loading?C.faint:C.accent,color:loading?C.muted:"#111",border:"none",borderRadius:"8px",padding:"10px 18px",fontFamily:"inherit",fontSize:"13px",fontWeight:700,cursor:loading?"default":"pointer",whiteSpace:"nowrap",height:"40px"}}>
-                  {loading ? "Cargando..." : "🔄 Traer productos"}
+                  {loading?"Cargando...":"🔄 Traer productos"}
                 </button>
               </div>
               {error && (
@@ -285,7 +382,7 @@
                 Token en Loyverse Back Office → Configuración → Acceso API →{" "}
                 <a href="https://help.loyverse.com/help/loyverse-api" target="_blank" rel="noreferrer">Ver guía</a>
                 {"   ·   "}
-                <span style={{color:C.green}}>🔒 Solo lectura — no modifica Loyverse</span>
+                <span style={{color:C.green}}>🔒 Solo lectura · Los cambios de precio se detectan automáticamente</span>
               </div>
             </div>
 
@@ -293,10 +390,10 @@
             {items.length > 0 && pct > 0 && (
               <div style={{display:"flex",gap:"10px",marginBottom:"16px",flexWrap:"wrap"}}>
                 {[
-                  {label:"Inflación aplicada",   value:`+${pct}%`,                      color:C.accent, bg:C.accentDim},
-                  {label:"Total actual",          value:fmt(totalCurrent),                color:C.muted,  bg:C.card},
-                  {label:"Total sugerido",        value:fmt(totalSuggested),              color:C.green,  bg:C.greenDim},
-                  {label:"Diferencia total",      value:fmt(totalSuggested-totalCurrent), color:C.accent, bg:C.accentDim},
+                  {label:"Inflación aplicada",  value:`+${pct}%`,                      color:C.accent, bg:C.accentDim},
+                  {label:"Total actual",         value:fmt(totalCurrent),                color:C.muted,  bg:C.card},
+                  {label:"Total sugerido",       value:fmt(totalSuggested),              color:C.green,  bg:C.greenDim},
+                  {label:"Diferencia total",     value:fmt(totalSuggested-totalCurrent), color:C.accent, bg:C.accentDim},
                 ].map(({label,value,color,bg})=>(
                   <div key={label} style={{flex:1,minWidth:"140px",background:bg,border:`1px solid ${color}33`,borderRadius:"12px",padding:"14px 16px"}}>
                     <div style={{fontSize:"11px",color:C.muted,marginBottom:"5px"}}>{label}</div>
@@ -306,28 +403,25 @@
               </div>
             )}
 
-            {/* TABLE TOOLBAR */}
+            {/* TOOLBAR */}
             {items.length > 0 && (
               <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
                 <input placeholder="Buscar por nombre o SKU..." value={filter}
-                  onChange={(e)=>setFilter(e.target.value)}
+                  onChange={e=>setFilter(e.target.value)}
                   style={inp({fontSize:"12px",padding:"7px 12px",width:"230px"})} />
-                <span style={{fontSize:"12px",color:C.muted,marginLeft:"4px"}}>
-                  {filtered.length !== items.length ? `${filtered.length} de ${items.length} productos` : `${items.length} productos`}
+                <span style={{fontSize:"12px",color:C.muted}}>
+                  {filtered.length!==items.length ? `${filtered.length} de ${items.length}` : `${items.length}`} productos
                 </span>
                 <div style={{marginLeft:"auto"}}>
                   <button
-                    onClick={()=>exportPDF(items, pct, history)}
+                    onClick={()=>exportPDF(items,pct,roundTo,history,indec)}
                     disabled={pct===0}
                     title={pct===0?"Ingresá un % de inflación primero":"Exportar lista completa a PDF"}
                     style={{
-                      background: pct===0 ? C.faint : C.red,
-                      color: pct===0 ? C.muted : "#fff",
-                      border:"none", borderRadius:"8px",
-                      padding:"9px 18px", fontFamily:"inherit",
-                      fontSize:"13px", fontWeight:700,
-                      cursor: pct===0 ? "default" : "pointer",
-                      whiteSpace:"nowrap",
+                      background:pct===0?C.faint:C.red, color:pct===0?C.muted:"#fff",
+                      border:"none", borderRadius:"8px", padding:"9px 18px",
+                      fontFamily:"inherit", fontSize:"13px", fontWeight:700,
+                      cursor:pct===0?"default":"pointer", whiteSpace:"nowrap",
                     }}>
                     📄 Exportar PDF
                   </button>
@@ -346,19 +440,20 @@
                         <Th col="price"     label="Precio actual"     right />
                         <Th col="suggested" label={`Sugerido +${pct}%`} right />
                         <Th col="diff"      label="Diferencia"        right />
-                        <Th col="updated"   label="Últ. actualización" />
+                        <Th col="changed"   label="Últ. cambio detectado" />
                       </tr>
                     </thead>
                     <tbody>
-                      {filtered.map((item, idx) => {
+                      {filtered.map((item,idx) => {
                         const sp      = suggested(item.price);
-                        const diff    = sp != null && item.price != null ? sp - item.price : null;
-                        const dp      = item.price ? ((sp - item.price) / item.price) * 100 : 0;
-                        const lastUpd = history[item.variantId];
+                        const diff    = sp!=null && item.price!=null ? sp-item.price : null;
+                        const dp      = item.price ? ((sp-item.price)/item.price)*100 : 0;
+                        const h       = history[item.variantId];
+                        const changed = h?.changedAt;
 
                         return (
                           <tr key={item.variantId}
-                            style={{background: idx%2===0 ? "transparent" : C.surface+"44"}}>
+                            style={{background:idx%2===0?"transparent":C.surface+"44"}}>
                             <td style={{padding:"11px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`}}>
                               {item.name}
                               {item.sku && <span style={{marginLeft:"8px",fontSize:"10px",color:C.faint,fontWeight:400}}>{item.sku}</span>}
@@ -378,16 +473,16 @@
                               ) : "—"}
                             </td>
                             <td style={{padding:"11px 14px",fontSize:"11px",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
-                              {lastUpd
-                                ? <span style={{color:C.green}}>✓ {fmtDate(lastUpd)}</span>
-                                : <span style={{color:C.faint}}>Sin registro</span>}
+                              {changed
+                                ? <span style={{color:C.green}}>✓ {fmtDate(changed)}</span>
+                                : <span style={{color:C.faint}}>Sin cambios detectados</span>}
                             </td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
-                  {filtered.length === 0 && (
+                  {filtered.length===0 && (
                     <div style={{textAlign:"center",padding:"50px",color:C.muted,fontSize:"13px"}}>
                       No hay productos que coincidan.
                     </div>
@@ -401,10 +496,11 @@
               <div style={{background:C.card,border:`1px dashed ${C.border}`,borderRadius:"12px",padding:"60px 24px",textAlign:"center"}}>
                 <div style={{fontSize:"40px",marginBottom:"12px"}}>📦</div>
                 <div style={{fontSize:"15px",color:C.muted,marginBottom:"6px"}}>
-                  Ingresá tu token y el % de inflación, luego presioná "Traer productos"
+                  Ingresá tu token y presioná "Traer productos"
                 </div>
-                <div style={{fontSize:"12px",color:C.faint}}>
-                  🔒 Solo lectura — no modifica nada en Loyverse
+                <div style={{fontSize:"12px",color:C.faint,lineHeight:"1.6"}}>
+                  🔒 Solo lectura · Los cambios de precio se detectan automáticamente comparando<br/>
+                  con la última vez que cargaste los productos.
                 </div>
               </div>
             )}
