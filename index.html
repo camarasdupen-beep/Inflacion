@@ -221,6 +221,7 @@
       const [sortBy,    setSortBy]    = useState("category");
       const [sortDir,   setSortDir]   = useState(1);
       const [history,   setHistory]   = useState(() => loadJSON(LS_HISTORY, {}));
+      const [debugInfo, setDebugInfo] = useState([]);
       const [indec,     setIndec]     = useState(null);
       const [indecLoad, setIndecLoad] = useState(false);
 
@@ -296,6 +297,19 @@
                 categoryId: item.category_id || null,
                 price: getPrice(v), cost:v.cost??null, sku:v.sku||""
               });
+
+          // Debug: capturar primeros 3 productos para ver estructura de precio
+          const debugSample = flat.slice(0, 20).map(item => {
+            const raw = all.find(i => i.id === item.id);
+            const v   = raw?.variants?.find(v => v.variant_id === item.variantId || v.id === item.variantId);
+            return {
+              name: item.name,
+              precio_app: item.price,
+              default_price: v?.default_price,
+              stores: v?.stores?.map(s => ({ store_id: s.store_id, price: s.price })),
+            };
+          });
+          setDebugInfo(debugSample);
 
           const updatedHistory = applySnapshot(flat, loadJSON(LS_HISTORY, {}));
           setHistory(updatedHistory);
@@ -382,6 +396,33 @@
           </div>
 
           <div style={{maxWidth:"1100px",margin:"0 auto",padding:"24px 16px"}}>
+
+            {/* DEBUG PANEL */}
+            {debugInfo.length > 0 && (
+              <div style={{background:"#1a1a2e",border:"1px solid #f0b429",borderRadius:"10px",padding:"14px 18px",marginBottom:"16px",fontSize:"11px",color:"#e6edf3",overflowX:"auto"}}>
+                <div style={{color:"#f0b429",fontWeight:700,marginBottom:"8px"}}>🔍 Debug precios (primeros 20 productos)</div>
+                <table style={{borderCollapse:"collapse",width:"100%",fontSize:"11px"}}>
+                  <thead>
+                    <tr>
+                      {["Producto","App muestra","default_price","stores[].price"].map(h=>(
+                        <th key={h} style={{textAlign:"left",padding:"4px 8px",borderBottom:"1px solid #333",color:"#f0b429"}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {debugInfo.map((d,i)=>(
+                      <tr key={i} style={{background: d.precio_app !== d.default_price ? "#2a1a1a" : "transparent"}}>
+                        <td style={{padding:"3px 8px",maxWidth:"140px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.name}</td>
+                        <td style={{padding:"3px 8px",color: d.precio_app !== d.default_price ? "#f85149":"#3fb950"}}>${d.precio_app}</td>
+                        <td style={{padding:"3px 8px"}}>${d.default_price}</td>
+                        <td style={{padding:"3px 8px",fontSize:"10px"}}>{d.stores?.map(s=>"$"+s.price).join(", ")||"—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{marginTop:"8px",fontSize:"10px",color:"#768390"}}>Filas en rojo = precio_app difiere de default_price</div>
+              </div>
+            )}
 
             {/* INDEC BANNER */}
             <div style={{
