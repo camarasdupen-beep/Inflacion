@@ -221,7 +221,6 @@
       const [sortBy,    setSortBy]    = useState("category");
       const [sortDir,   setSortDir]   = useState(1);
       const [history,   setHistory]   = useState(() => loadJSON(LS_HISTORY, {}));
-      const [debugInfo, setDebugInfo] = useState(null);
       const [indec,     setIndec]     = useState(null);
       const [indecLoad, setIndecLoad] = useState(false);
 
@@ -277,11 +276,11 @@
             cursor = data.cursor || null;
           } while (cursor);
 
-          // Loyverse puede devolver precio en distintos campos segun configuracion
+          // El precio real esta en v.stores[0].price (precio del local)
+          // default_price es el precio base pero stores sobrescribe por local
           const getPrice = (v) => {
-            // store_prices tiene el precio por local (mas confiable)
-            if (Array.isArray(v.store_prices) && v.store_prices.length > 0) {
-              const sp = v.store_prices[0];
+            if (Array.isArray(v.stores) && v.stores.length > 0) {
+              const sp = v.stores[0];
               if (sp.price != null) return sp.price;
             }
             if (v.default_price != null) return v.default_price;
@@ -297,18 +296,6 @@
                 categoryId: item.category_id || null,
                 price: getPrice(v), cost:v.cost??null, sku:v.sku||""
               });
-
-          // Debug: guardar raw del primer item para mostrar en pantalla
-          if (all.length > 0) {
-            const v0 = all[0].variants?.[0] || {};
-            setDebugInfo({
-              item_name: all[0].item_name,
-              default_price: v0.default_price,
-              price: v0.price,
-              store_prices: JSON.stringify(v0.store_prices?.slice(0,2)),
-              campos: Object.keys(v0).join(", ")
-            });
-          }
 
           const updatedHistory = applySnapshot(flat, loadJSON(LS_HISTORY, {}));
           setHistory(updatedHistory);
@@ -395,18 +382,6 @@
           </div>
 
           <div style={{maxWidth:"1100px",margin:"0 auto",padding:"24px 16px"}}>
-
-            {/* DEBUG PANEL */}
-            {debugInfo && (
-              <div style={{background:"#1a1a2e",border:"1px solid #f0b429",borderRadius:"10px",padding:"14px 18px",marginBottom:"16px",fontSize:"12px",color:"#e6edf3"}}>
-                <div style={{color:"#f0b429",fontWeight:700,marginBottom:"8px"}}>🔍 Debug — campos de precio (primer producto)</div>
-                <div><b>Producto:</b> {debugInfo.item_name}</div>
-                <div><b>default_price:</b> {String(debugInfo.default_price)}</div>
-                <div><b>price:</b> {String(debugInfo.price)}</div>
-                <div><b>store_prices:</b> {debugInfo.store_prices}</div>
-                <div style={{marginTop:"6px",color:"#768390",fontSize:"11px"}}><b>Todos los campos de la variante:</b> {debugInfo.campos}</div>
-              </div>
-            )}
 
             {/* INDEC BANNER */}
             <div style={{
