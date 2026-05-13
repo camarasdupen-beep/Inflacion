@@ -292,12 +292,14 @@
 
           const flat = [];
           for (const item of all)
-            for (const v of item.variants || [])
+            for (const v of item.variants || []) {
+              const vid = v.variant_id || v.id;  // Loyverse usa variant_id, no id
               flat.push({
-                id:item.id, variantId:v.id, name:item.item_name,
+                id:item.id, variantId:vid, name:item.item_name,
                 categoryId: item.category_id || null,
                 price: getPrice(v), cost:v.cost??null, sku:v.sku||""
               });
+            }
 
           const updatedHistory = applySnapshot(flat, loadJSON(LS_HISTORY, {}));
           setHistory(updatedHistory);
