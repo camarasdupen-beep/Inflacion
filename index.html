@@ -225,6 +225,7 @@
       const [items,     setItems]     = useState([]);
       const [catMap,    setCatMap]    = useState({});  // { categoryId: categoryName }
       const [filter,    setFilter]    = useState("");
+      const [catFilter, setCatFilter] = useState("todas");
       const [sortBy,    setSortBy]    = useState("category");
       const [sortDir,   setSortDir]   = useState(1);
       const [history,   setHistory]   = useState(() => loadJSON(LS_HISTORY, {}));
@@ -344,13 +345,13 @@
 
       const getCatName = (id) => catMap[id] || "Sin categoría";
 
+      const sortedCatNames = ["todas", ...Object.values(catMap).sort((a,b)=>a.localeCompare(b))];
+
       const filtered = items
         .filter(i => {
-          if (!filter) return true;
-          const q = filter.toLowerCase();
-          return i.name.toLowerCase().includes(q)
-              || i.sku.toLowerCase().includes(q)
-              || getCatName(i.categoryId).toLowerCase().includes(q);
+          const matchCat = catFilter === "todas" || getCatName(i.categoryId) === catFilter;
+          const matchQ   = !filter || i.name.toLowerCase().includes(filter.toLowerCase()) || i.sku.toLowerCase().includes(filter.toLowerCase());
+          return matchCat && matchQ;
         })
         .sort((a,b) => {
           let va = a[sortBy], vb = b[sortBy];
@@ -505,9 +506,15 @@
             {/* TOOLBAR */}
             {items.length > 0 && (
               <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
-                <input placeholder="Buscar por nombre, SKU o categoría..." value={filter}
+                <select value={catFilter} onChange={e=>setCatFilter(e.target.value)}
+                  style={{...inp({fontSize:"12px",padding:"7px 12px"}),width:"180px",cursor:"pointer"}}>
+                  {sortedCatNames.map(c=>(
+                    <option key={c} value={c}>{c==="todas"?"Todos los proveedores":c}</option>
+                  ))}
+                </select>
+                <input placeholder="Buscar producto..." value={filter}
                   onChange={e=>setFilter(e.target.value)}
-                  style={inp({fontSize:"12px",padding:"7px 12px",width:"260px"})} />
+                  style={inp({fontSize:"12px",padding:"7px 12px",width:"180px"})} />
                 <span style={{fontSize:"12px",color:C.muted}}>
                   {filtered.length!==items.length?`${filtered.length} de ${items.length}`:`${items.length}`} productos
                 </span>
