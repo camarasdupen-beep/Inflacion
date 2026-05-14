@@ -50,6 +50,12 @@
            + " " + d.toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"});
     };
 
+    const daysSince = (iso) => {
+      if (!iso) return null;
+      const diff = Date.now() - new Date(iso).getTime();
+      return Math.floor(diff / (1000 * 60 * 60 * 24));
+    };
+
     const loadJSON = (key, fallback) => {
       try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; }
       catch { return fallback; }
@@ -531,8 +537,7 @@
                         <Th col="price"     label="Precio actual"      right />
                         <Th col="suggested" label={`Sugerido +${pct}%`} right />
                         <Th col="diff"      label="Diferencia"         right />
-                        <Th col="changed"   label="Últ. cambio" />
-                        <Th col="manual"    label="Actualicé" />
+                        <Th col="manual"    label="Actualización" />
                       </tr>
                     </thead>
                     <tbody>
@@ -540,8 +545,7 @@
                         const sp      = suggested(item.price);
                         const diff    = sp!=null && item.price!=null ? sp-item.price : null;
                         const dp      = item.price ? ((sp-item.price)/item.price)*100 : 0;
-                        const h       = history[item.variantId];
-                        const changed = h?.changedAt;
+
                         const catName = getCatName(item.categoryId);
 
                         return (
@@ -568,19 +572,19 @@
                                 </div>
                               ) : "—"}
                             </td>
-                            <td style={{padding:"10px 14px",fontSize:"11px",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
-                              {changed
-                                ? <span style={{color:C.green}}>✓ {fmtDate(changed)}</span>
-                                : <span style={{color:C.faint}}>Sin cambios</span>}
-                            </td>
                             <td style={{padding:"8px 10px",borderBottom:`1px solid ${C.border}22`,textAlign:"center",whiteSpace:"nowrap"}}>
                               {manual[item.variantId] ? (
-                                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"2px"}}>
-                                  <span style={{fontSize:"10px",color:C.green,fontWeight:600}}>✓ {fmtDate(manual[item.variantId])}</span>
+                                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"3px"}}>
+                                  <span style={{fontSize:"11px",color:C.green,fontWeight:700}}>
+                                    {fmtDate(manual[item.variantId])}
+                                  </span>
+                                  <span style={{fontSize:"10px",color:C.muted}}>
+                                    hace {daysSince(manual[item.variantId])} {daysSince(manual[item.variantId]) === 1 ? "día" : "días"}
+                                  </span>
                                   <button
-                                    onClick={()=>unmarkUpdated(item.variantId)}
-                                    style={{background:"transparent",border:`1px solid ${C.faint}`,borderRadius:"4px",padding:"1px 6px",fontSize:"9px",color:C.muted,cursor:"pointer",fontFamily:"inherit"}}>
-                                    deshacer
+                                    onClick={()=>markUpdated(item.variantId)}
+                                    style={{background:C.accentDim,border:`1px solid ${C.accent}44`,borderRadius:"5px",padding:"3px 8px",fontSize:"10px",fontWeight:700,color:C.accent,cursor:"pointer",fontFamily:"inherit",marginTop:"2px"}}>
+                                    ↺ Actualizar
                                   </button>
                                 </div>
                               ) : (
