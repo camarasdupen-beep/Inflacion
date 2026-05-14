@@ -217,7 +217,7 @@
 
     // ─────────────────────────────────────────────────────────────────────────
     function App() {
-      const [token,     setToken]     = useState("");
+      const [token,     setToken]     = useState("ea72d0bcfe4a438aad213a106c9aea46");
       const [inflation, setInflation] = useState("");
       const [rounding,  setRounding]  = useState("10");
       const [loading,   setLoading]   = useState(false);
@@ -240,6 +240,9 @@
         const raw = price * (1 + pct / 100);
         return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
       };
+
+      // ── auto-fetch products on mount ─────────────────────────────────────
+      useEffect(() => { fetchProducts(); }, []);
 
       // ── fetch INDEC ───────────────────────────────────────────────────────
       useEffect(() => {
@@ -438,8 +441,8 @@
               {indec && <div style={{marginLeft:"auto",fontSize:"11px",color:C.muted,textAlign:"right"}}><div>Precargado</div><div>en el campo ↓</div></div>}
             </div>
 
-            {/* CONFIG */}
-            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",padding:"20px",marginBottom:"20px"}}>
+            {/* CONFIG - hidden, token hardcoded */}
+            <div style={{display:"none"}}>
               <div style={{fontSize:"11px",color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginBottom:"14px"}}>⚙ Configuración</div>
               <div style={{display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"flex-end"}}>
                 <div style={{flex:2,minWidth:"220px",display:"flex",flexDirection:"column",gap:"5px"}}>
